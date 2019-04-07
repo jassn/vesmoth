@@ -1,4 +1,4 @@
-/* $Id: sound.cpp 28 2003-09-19 10:21:25Z zas $ */
+/* $Id: sound.cpp,v 1.15 2004/06/15 14:32:55 Sirp Exp $ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net
@@ -10,6 +10,10 @@
 
    See the COPYING file for more details.
 */
+
+#include "filesystem.hpp"
+#include "game_config.hpp"
+#include "log.hpp"
 #include "sound.hpp"
 
 #include "SDL_mixer.h"
@@ -34,11 +38,10 @@ namespace sound {
 
 manager::manager()
 {
-	const int res =
-	       Mix_OpenAudio(MIX_DEFAULT_FREQUENCY,MIX_DEFAULT_FORMAT,2,1024);
+	const int res = Mix_OpenAudio(MIX_DEFAULT_FREQUENCY,MIX_DEFAULT_FORMAT,2,1024);
 	if(res >= 0) {
 		mix_ok = true;
-		Mix_AllocateChannels(8);
+		Mix_AllocateChannels(16);
 	} else {
 		mix_ok = false;
 		std::cerr << "Could not initialize audio: " << SDL_GetError() << "\n";
@@ -47,6 +50,7 @@ manager::manager()
 
 manager::~manager()
 {
+	std::cerr << "closing audio...\n";
 	if(!mix_ok)
 		return;
 
@@ -63,7 +67,9 @@ manager::~manager()
 		Mix_FreeMusic(j->second);
 	}
 
+	std::cerr << "final closing audio...\n";
 	Mix_CloseAudio();
+	std::cerr << "done closing audio...\n";
 }
 
 void play_music(const std::string& file)
@@ -76,32 +82,22 @@ void play_music(const std::string& file)
 		return;
 	}
 
-	std::map<std::string,Mix_Music*>::const_iterator itor =
-	                                              music_cache.find(file);
+	std::map<std::string,Mix_Music*>::const_iterator itor = music_cache.find(file);
 	if(itor == music_cache.end()) {
-		static const std::string music_prefix = "music/";
-
-		std::string filename;
-		Mix_Music* music = NULL;
-
-#ifdef WESNOTH_PATH
-		filename = WESNOTH_PATH + std::string("/") + music_prefix + file;
-		music = Mix_LoadMUS(filename.c_str());
-#endif
-
-		if(music == NULL) {
-			filename = music_prefix + file;
-			music = Mix_LoadMUS(filename.c_str());
+		const std::string& filename = get_binary_file_location("music",file);
+		
+		if(filename.empty()) {
+			return;
 		}
 
+		Mix_Music* const music = Mix_LoadMUS(filename.c_str());
 		if(music == NULL) {
 			std::cerr << "Could not load music file '" << filename << "': "
 			          << SDL_GetError() << "\n";
 			return;
 		}
 
-		itor = music_cache.insert(std::pair<std::string,Mix_Music*>(
-		                                            file,music)).first;
+		itor = music_cache.insert(std::pair<std::string,Mix_Music*>(file,music)).first;
 	}
 
 	if(Mix_PlayingMusic()) {
@@ -121,31 +117,23 @@ void play_sound(const std::string& file)
 	if(!mix_ok || sound_off)
 		return;
 
-	std::map<std::string,Mix_Chunk*>::const_iterator itor =
-	                                              sound_cache.find(file);
+	std::map<std::string,Mix_Chunk*>::const_iterator itor = sound_cache.find(file);
 	if(itor == sound_cache.end()) {
-		static const std::string sound_prefix = "sounds/";
-		std::string filename;
-		Mix_Chunk* sfx = NULL;
 
-#ifdef WESNOTH_PATH
-		filename = WESNOTH_PATH + std::string("/") + sound_prefix + file;
-		sfx = Mix_LoadWAV(filename.c_str());
-#endif
+		const std::string& filename = get_binary_file_location("sounds",file);
 
-		if(sfx == NULL) {
-			filename = sound_prefix + file;
-			sfx = Mix_LoadWAV(filename.c_str());
+		if(filename.empty()) {
+			return;
 		}
 
+		Mix_Chunk* const sfx = Mix_LoadWAV(filename.c_str());
 		if(sfx == NULL) {
 			std::cerr << "Could not load sound file '" << filename << "': "
 			          << SDL_GetError() << "\n";
 			return;
 		}
 
-		itor = sound_cache.insert(std::pair<std::string,Mix_Chunk*>(
-		                                            file,sfx)).first;
+		itor = sound_cache.insert(std::pair<std::string,Mix_Chunk*>(file,sfx)).first;
 	}
 
 	//play on the first available channel

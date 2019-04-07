@@ -1,4 +1,4 @@
-/* $Id: util.hpp 48 2003-09-19 23:39:03Z Sirp $ */
+/* $Id: util.hpp,v 1.16 2004/05/21 17:26:13 Sirp Exp $ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net
@@ -13,7 +13,9 @@
 #ifndef UTIL_H_INCLUDED
 #define UTIL_H_INCLUDED
 
+#include <cmath>
 #include <map>
+#include <sstream>
 
 //instead of playing with VC++'s crazy definitions of min and max,
 //just define our own
@@ -30,9 +32,63 @@ template<typename T>
 const T& maximum(const T& a, const T& b) { return a < b ? b : a; }
 
 template<typename T>
-inline bool is_odd(T num) { return (static_cast<unsigned int>(num)&1) == 1; }
+inline bool is_odd(T num) { return (static_cast<unsigned int>(num > 0 ? num : -num)&1) == 1; }
 
 template<typename T>
 inline bool is_even(T num) { return !is_odd(num); }
+
+//place in our own namespace as to not clash with possible
+//standard library definitions
+namespace util {
+
+template<typename T>
+T round(T n) { return floor(n + 0.5); }
+
+}
+
+struct bad_lexical_cast {};
+
+template<typename To, typename From>
+To lexical_cast(From a)
+{
+	To res;
+	std::stringstream str;
+	
+	if(!(str << a && str >> res)) {
+		throw bad_lexical_cast();
+	} else {
+		return res;
+	}
+}
+
+template<typename To, typename From>
+To lexical_cast_default(From a, To def=To())
+{
+	To res;
+	std::stringstream str;
+	
+	if(!(str << a && str >> res)) {
+		return def;
+	} else {
+		return res;
+	}
+}
+
+template<typename From>
+std::string str_cast(From a)
+{
+	return lexical_cast<std::string,From>(a);
+}
+
+inline bool chars_equal_insensitive(char a, char b) { return tolower(a) == tolower(b); }
+
+//a definition of 'push_back' for strings, since some implementations
+//don't support string::push_back
+template<typename T, typename C>
+void push_back(T& str, C c)
+{
+	str.resize(str.size()+1);
+	str[str.size()-1] = c;
+}
 
 #endif

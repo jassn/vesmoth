@@ -1,4 +1,4 @@
-/* $Id: slider.hpp 30 2003-09-19 10:26:23Z zas $ */
+/* $Id: slider.hpp,v 1.17 2004/06/17 18:48:35 Sirp Exp $ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net
@@ -15,40 +15,39 @@
 
 #include "SDL.h"
 
-#include "../display.hpp"
 #include "../sdl_utils.hpp"
+
+#include "widget.hpp"
 
 #include <vector>
 
 namespace gui {
 
-class slider
+class slider : public widget
 {
-	display& disp_;
-	SDL_Surface* image_, *selectedImage_;
-	scoped_sdl_surface buffer_;
-	SDL_Rect area_;
-
-	double value_;
-
-	bool drawn_;
-
-	bool highlight_, clicked_, dragging_;
-
-	SDL_Rect slider_area() const;
-
 public:
-	slider(display& disp, SDL_Rect& rect, double value);
+	slider(display& d, const SDL_Rect& rect);
 
-	static int height(display& disp);
+	void set_min(int value);
+	void set_max(int value);
+	void set_value(int value);
+	int value() const;
+	int max_value() const;
+	int min_value() const;
 
+	void process();
+
+private:
+	SDL_Rect slider_area() const;
 	void draw();
 
-	double process(int mousex, int mousey, bool button);
+	int min_;
+	int max_;
+	int value_;
 
-	const SDL_Rect& area() const;
-
-	void background_changed();
+	bool highlight_;
+	bool clicked_;
+	bool dragging_;
 };
 
 }

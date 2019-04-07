@@ -1,4 +1,4 @@
-/* $Id: key.cpp 59 2003-09-20 10:43:17Z Sirp $ */
+/* $Id: key.cpp,v 1.12 2003/12/23 22:45:30 uid66289 Exp $ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net
@@ -27,7 +27,7 @@ int main( void )
 	for(;;) {
 		if( key[KEY_RETURN] != 0 )
 			printf( "key(ENTER) pressed\n" );
-		if( key[KEY_ESCAPE] != 0 )
+		if( key[SDLK_ESCAPE] != 0 )
 			return 1;
 	}
 }
@@ -42,7 +42,7 @@ CKey::CKey() : is_enabled(true)
 
 int CKey::operator[]( int code )
 {
-	return (code == KEY_ESCAPE || is_enabled) && int(key_list[code]);
+	return (code == SDLK_ESCAPE || is_enabled) && int(key_list[code]);
 }
 
 void CKey::SetEnabled( bool enable )

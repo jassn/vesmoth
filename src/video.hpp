@@ -1,4 +1,4 @@
-/* $Id: video.hpp 97 2003-09-26 11:52:42Z Sirp $ */
+/* $Id: video.hpp,v 1.24 2004/06/07 21:29:15 gruikya Exp $ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net
@@ -20,14 +20,26 @@
 #define VIDEO_MEMORY SDL_HWSURFACE
 #define SYSTEM_MEMORY SDL_SWSURFACE
 
+SDL_Surface* display_format_alpha(SDL_Surface* surf);
+SDL_Surface* get_video_surface();
+
+bool non_interactive();
+
+
+void update_rect(size_t x, size_t y, size_t w, size_t h);
+void update_rect(const SDL_Rect& rect);
+void update_whole_screen();
+
 class CVideo {
      public:
-	CVideo(const char* text);
-	CVideo( int x, int y, int bits_per_pixel, int flags, const char* text );
+	CVideo();
+	CVideo(int x, int y, int bits_per_pixel, int flags);
 	~CVideo();
 
 	int modePossible( int x, int y, int bits_per_pixel, int flags );
 	int setMode( int x, int y, int bits_per_pixel, int flags );
+
+	int setGamma(float gamma);
 
 	//functions to get the dimensions of the current video-mode
 	int getx() const;
@@ -53,19 +65,31 @@ class CVideo {
 
 	struct quit {};
 
-     private:
+	//functions to allow changing video modes when 16BPP is emulated
+	void setBpp( int bpp );
+	int getBpp();
 
-	SDL_Surface* frameBuffer;
-	char text_[256*8];
+	void make_fake();
+
+private:
+
+	int bpp;	// Store real bits per pixel
+
+	//if there is no display at all, but we 'fake' it for clients
+	bool fake_screen;
 };
 
-void allow_resizing(bool);
+//a structure which will detect if the resolution or fullscreen mode has changed
+struct video_change_detector {
+	video_change_detector(CVideo& video) : video_(video), full_(video.isFullScreen()), x_(video.getx()), y_(video.gety())
+	{}
 
-struct resize_lock {
-	resize_lock();
-	~resize_lock();
+	bool changed() const { return full_ != video_.isFullScreen() || x_ != video_.getx() || y_ != video_.gety(); }
+
+private:
+	CVideo& video_;
+	bool full_;
+	int x_, y_;
 };
-
-void pump_events();
 
 #endif

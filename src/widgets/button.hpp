@@ -1,4 +1,4 @@
-/* $Id: button.hpp 46 2003-09-19 16:46:59Z zas $ */
+/* $Id: button.hpp,v 1.25 2004/06/11 18:38:12 Sirp Exp $ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net
@@ -15,54 +15,68 @@
 
 #include "SDL.h"
 
-#include "../display.hpp"
+#include "widget.hpp"
 
+#include "../sdl_utils.hpp"
+
+#include <string>
 #include <vector>
+#include <string>
+
+class display;
 
 namespace gui {
 
-class button
+class button : public widget
 {
 public:
 	struct error {};
 
 	enum TYPE { TYPE_PRESS, TYPE_CHECK };
 
+	enum SPACE_CONSUMPTION { DEFAULT_SPACE, MINIMUM_SPACE };
+
 	button(display& disp, const std::string& label, TYPE type=TYPE_PRESS,
-	       const std::string& button_image="");
+	       std::string button_image="", SPACE_CONSUMPTION spacing=DEFAULT_SPACE);
 
-	button(const button& b);
-	button& operator=(const button& b);
-
-	~button();
+	virtual ~button() {}
 
 	void set_check(bool check);
 	bool checked() const;
 
 	void draw();
 
-	void set_x(int val);
-	void set_y(int val);
-	void set_xy(int valx, int valy);
-
-	int width() const;
-	int height() const;
+	void set_label(const std::string& val);
 
 	bool process(int mousex, int mousey, bool button);
+	bool pressed();
+
+	void enable(bool new_val);
+	bool enabled() const;
+
+protected:
+	virtual void handle_event(const SDL_Event& event);
+	virtual void mouse_motion(const SDL_MouseMotionEvent& event);
+	virtual void mouse_down(const SDL_MouseButtonEvent& event);
+	virtual void mouse_up(const SDL_MouseButtonEvent& event);
 
 private:
+
 	std::string label_;
 	display* display_;
-	SDL_Surface* image_, *pressedImage_, *activeImage_;
-	int x_, y_;
+	shared_sdl_surface image_, pressedImage_, activeImage_, pressedActiveImage_;
 	SDL_Rect textRect_;
 
 	bool button_;
 
-	enum STATE { UNINIT, NORMAL, ACTIVE, PRESSED };
+	enum STATE { UNINIT, NORMAL, ACTIVE, PRESSED, PRESSED_ACTIVE };
 	STATE state_;
 
 	TYPE type_;
+
+	bool enabled_;
+
+	bool pressed_;
 
 	bool hit(int x, int y) const;
 }; //end class button

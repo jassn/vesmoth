@@ -1,4 +1,4 @@
-/* $Id: textbox.hpp 30 2003-09-19 10:26:23Z zas $ */
+/* $Id: textbox.hpp,v 1.28 2004/06/23 23:43:38 Sirp Exp $ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net
@@ -10,47 +10,90 @@
 
    See the COPYING file for more details.
 */
+
 #ifndef TEXTBOX_HPP_INCLUDED
 #define TEXTBOX_HPP_INCLUDED
 
-#include "../display.hpp"
+#include "../events.hpp"
 #include "../key.hpp"
+#include "../language.hpp"
 #include "../sdl_utils.hpp"
+
+#include "button.hpp"
+#include "scrollbar.hpp"
+#include "widget.hpp"
+
+#include "SDL.h"
 
 namespace gui {
 
-#define INPUT_CHAR_START (' ')
-#define INPUT_CHAR_END ('~' + 1)
-#define CHAR_LENGTH (INPUT_CHAR_END - INPUT_CHAR_START)
-
-class textbox
+class textbox : public widget, public scrollable
 {
-	display& disp_;
-	std::string text_;
-	unsigned int firstOnScreen_, cursor_;
-	int height_, width_;
-
-	scoped_sdl_surface buffer_;
-	int x_, y_;
-
-	CKey key_;
-	bool previousKeyState_[CHAR_LENGTH];
-
-	bool lastLArrow_, lastRArrow_, lastDelete_, lastBackspace_;
-
-	void draw_cursor(int pos) const;
-
 public:
-	textbox(display& disp, int width, const std::string& text="");
+	textbox(display& d, int width, const std::string& text="", bool editable=true);
 
-	int height() const;
-	int width() const;
-	const std::string& text() const;
-
-	void draw() const;
+	const std::string text() const;
+	void set_text(std::string text);
+	void clear();
 	void process();
 
-	void set_location(int x, int y);
+	void set_editable(bool value);
+	bool editable() const;
+
+	void scroll_to_bottom();
+
+	void set_wrap(bool val);
+
+	void draw();
+
+private:
+	void scroll(int pos);
+
+	wide_string text_;
+	
+	// mutable unsigned int firstOnScreen_;
+	int cursor_;
+	int selstart_;
+	int selend_;
+	bool grabmouse_;
+
+	int text_pos_;
+	int cursor_pos_;
+	std::vector<int> char_x_, char_y_;
+
+	bool editable_;
+
+	bool show_cursor_;
+
+	//records the time the cursor was shown at last
+	//the cursor should be inverted every 500 ms.
+	//this will be reset when keyboard input events occur
+	int show_cursor_at_;
+	shared_sdl_surface text_image_;
+	SDL_Rect text_size_;
+
+	//variables used for multi-line textboxes which support scrolling
+	scrollbar scrollbar_;
+	button uparrow_, downarrow_;
+
+	bool scroll_bottom_;
+
+	bool wrap_;
+
+	size_t line_height_, yscroll_;
+
+	void handle_event(const SDL_Event& event);
+
+	void draw_cursor(int pos, display &disp) const;
+	void update_text_cache(bool reset = false);
+	bool is_selection();
+	void erase_selection();
+
+	//make it so that only one textbox object can be receiving
+	//events at a time.
+	bool requires_event_focus() const { return editable_; }
+
+	bool show_scrollbar() const;
 };
 
 }

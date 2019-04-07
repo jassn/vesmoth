@@ -1,4 +1,4 @@
-/* $Id: game_events.hpp 28 2003-09-19 10:21:25Z zas $ */
+/* $Id: game_events.hpp,v 1.20 2004/05/03 18:08:26 Sirp Exp $ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net
@@ -17,33 +17,57 @@
 #include "display.hpp"
 #include "gamestatus.hpp"
 #include "map.hpp"
+#include "team.hpp"
 #include "unit.hpp"
 #include "unit_types.hpp"
 
 #include <map>
 
+//this file defines the game's events mechanism. Events might be units
+//moving or fighting, or when victory or defeat occurs. A scenario's
+//configuration file will define actions to take when certain events
+//occur. This module is responsible for making sure that when the events
+//occur, the actions take place.
+//
+//note that game events have nothing to do with SDL events, like mouse
+//movement, keyboard events, etc. See events.hpp for how they are handled.
 namespace game_events
 {
 
-bool conditional_passed(game_state& state_of_game,
-                        const std::map<gamemap::location,unit>* units,
-                        config& cond);
+std::string& get_variable(const std::string& varname);
+const std::string& get_variable_const(const std::string& varname);
+config& get_variable_cfg(const std::string& varname);
 
+void set_variable(const std::string& varname, const std::string& value);
+
+//the game event manager loads the scenario configuration object, and
+//ensures that events are handled according to the scenario configuration
+//for its lifetime.
+//
+//thus, a manager object should be created when a scenario is played, and
+//destroyed at the end of the scenario.
 struct manager {
-	manager(config& cfg, display& disp, gamemap& map,
-	        std::map<gamemap::location,unit>& units,
-		    game_state& state_of_game, game_data& data);
+	//note that references will be maintained, and must remain valid
+	//for the life of the object.
+	manager(config& scenario_cfg, display& disp, gamemap& map,
+	        std::map<gamemap::location,unit>& units, std::vector<team>& teams,
+		    game_state& state_of_game, gamestatus& status, game_data& data);
 	~manager();
 };
 
-void raise(const std::string& event,
-           const gamemap::location& loc1=gamemap::location::null_location,
-           const gamemap::location& loc2=gamemap::location::null_location);
+void write_events(config& cfg);
 
+bool unit_matches_filter(unit_map::const_iterator itor, const config& filter);
+
+//function to fire an event. Events may have up to two arguments, both of
+//which must be locations.
 bool fire(const std::string& event,
           const gamemap::location& loc1=gamemap::location::null_location,
           const gamemap::location& loc2=gamemap::location::null_location);
 
+bool conditional_passed(game_state& state_of_game,
+                        const std::map<gamemap::location,unit>* units,
+                        const config& cond);
 bool pump();
 
 }

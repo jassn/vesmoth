@@ -1,4 +1,4 @@
-/* $Id: log.hpp 28 2003-09-19 10:21:25Z zas $ */
+/* $Id: log.hpp,v 1.12 2004/02/16 22:10:45 uid68803 Exp $ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net
@@ -45,16 +45,16 @@ private:
 	static int indent;
 };
 
-#define log(a) std::cerr << a << "\n";
-#define log1(a,b) std::cerr << a << " info: " << b << "\n";
-#define log2(a,b,c) std::cerr << a << " info: " << b << ", " << c << "\n";
+#define log_data0(a) std::cerr << a << "\n";
+#define log_data1(a,b) std::cerr << a << " info: " << b << "\n";
+#define log_data2(a,b,c) std::cerr << a << " info: " << b << ", " << c << "\n";
 
 #define log_scope(a) scope_logger scope_logging_object__(a);
 
 #else
-#define log(a)
-#define log1(a,b)
-#define log2(a,b,c)
+#define log_data0(a)
+#define log_data1(a,b)
+#define log_data2(a,b,c)
 
 #define log_scope(a)
 #endif

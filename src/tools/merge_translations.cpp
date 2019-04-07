@@ -1,4 +1,4 @@
-/* $Id: merge_translations.cpp 33 2003-09-19 10:34:59Z zas $ */
+/* $Id: merge_translations.cpp,v 1.10 2003/12/23 22:45:30 uid66289 Exp $ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net
@@ -46,7 +46,7 @@ int main(int argc, char** argv)
 		return 0;
 	}
 
-	std::vector<config*> translations = cfg.children["language"];
+	config::child_list translations = cfg.get_children("language");
 	if(translations.empty()) {
 		std::cerr << "no translation data found in '" << argv[1] << "'\n";
 		return 0;
@@ -66,7 +66,7 @@ int main(int argc, char** argv)
 		return 0;
 	}
 
-	translations = cfg.children["language"];
+	translations = cfg.get_children("language");
 	if(translations.empty()) {
 		std::cerr << "no translation data found in '" << argv[2] << "'\n";
 		return 0;

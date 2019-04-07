@@ -1,4 +1,4 @@
-/* $Id: video.cpp 97 2003-09-26 11:52:42Z Sirp $ */
+/* $Id: video.cpp,v 1.45 2004/06/14 18:41:00 Sirp Exp $ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net
@@ -12,7 +12,14 @@
 */
 #include <stdio.h>
 #include <iostream>
+#include <vector>
 
+#include "cursor.hpp"
+#include "events.hpp"
+#include "font.hpp"
+#include "halo.hpp"
+#include "image.hpp"
+#include "mouse.hpp"
 #include "preferences.hpp"
 #include "video.hpp"
 
@@ -21,7 +28,6 @@
 #if (TEST_VIDEO_ON==1)
 
 #include <stdlib.h>
-
 
 //test program takes three args - x-res y-res colour-depth
 int main( int argc, char** argv )
@@ -60,55 +66,169 @@ int main( int argc, char** argv )
 #endif
 
 namespace {
-	bool fullScreen = false;
+bool fullScreen = false;
 
-	unsigned int get_flags(unsigned int flags)
-	{
-		//SDL under Windows doesn't seem to like hardware surfaces for
-		//some reason.
-#ifndef _WIN32
-		flags |= SDL_HWSURFACE | SDL_DOUBLEBUF;
+unsigned int get_flags(unsigned int flags)
+{
+	//SDL under Windows doesn't seem to like hardware surfaces for
+	//some reason.
+#if !(defined(_WIN32) || defined(__APPLE__))
+		flags |= SDL_HWSURFACE;
 #endif
-		if((flags&SDL_FULLSCREEN) == 0)
-			flags |= SDL_RESIZABLE;
+	if((flags&SDL_FULLSCREEN) == 0)
+		flags |= SDL_RESIZABLE;
 
-		return flags;
-	}
+	return flags;
 }
 
-CVideo::CVideo(const char* text) : frameBuffer(NULL)
+std::vector<SDL_Rect> update_rects;
+bool update_all = false;
+
+bool rect_contains(const SDL_Rect& a, const SDL_Rect& b) {
+	return a.x <= b.x && a.y <= b.y && a.x+a.w >= b.x+b.w && a.y+a.h >= b.y+b.h;
+}
+
+void clear_updates()
 {
-	const int res =
-	       SDL_Init( SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_NOPARACHUTE);
+	update_all = false;
+	update_rects.clear();
+}
+
+SDL_Surface* frameBuffer = NULL;
+
+}
+
+bool non_interactive()
+{
+	return SDL_GetVideoSurface() == NULL;
+}
+
+SDL_Surface* display_format_alpha(SDL_Surface* surf)
+{
+	if(SDL_GetVideoSurface() != NULL)
+		return SDL_DisplayFormatAlpha(surf);
+	else if(frameBuffer != NULL)
+		return SDL_ConvertSurface(surf,frameBuffer->format,0);
+	else
+		return NULL;
+}
+
+SDL_Surface* get_video_surface()
+{
+	return frameBuffer;
+}
+
+void update_rect(size_t x, size_t y, size_t w, size_t h)
+{
+	const SDL_Rect rect = {x,y,w,h};
+	update_rect(rect);
+}
+
+void update_rect(const SDL_Rect& rect_value)
+{
+	if(update_all)
+		return;
+
+	SDL_Rect rect = rect_value;
+
+	SDL_Surface* const fb = SDL_GetVideoSurface();
+	if(fb != NULL) {
+		if(rect.x < 0) {
+			if(rect.x*-1 >= int(rect.w))
+				return;
+
+			rect.w += rect.x;
+			rect.x = 0;
+		}
+
+		if(rect.y < 0) {
+			if(rect.y*-1 >= int(rect.h))
+				return;
+
+			rect.h += rect.y;
+			rect.y = 0;
+		}
+
+		if(rect.x + rect.w > fb->w) {
+			rect.w = fb->w - rect.x;
+		}
+
+		if(rect.y + rect.h > fb->h) {
+			rect.h = fb->h - rect.y;
+		}
+
+		if(rect.x >= fb->w) {
+			return;
+		}
+
+		if(rect.y >= fb->h) {
+			return;
+		}
+	}
+
+	for(std::vector<SDL_Rect>::iterator i = update_rects.begin();
+	    i != update_rects.end(); ++i) {
+		if(rect_contains(*i,rect)) {
+			return;
+		}
+
+		if(rect_contains(rect,*i)) {
+			*i = rect;
+			for(++i; i != update_rects.end(); ++i) {
+				if(rect_contains(rect,*i)) {
+					i->w = 0;
+				}
+			}
+
+			return;
+		}
+	}
+
+	update_rects.push_back(rect);
+}
+
+void update_whole_screen()
+{
+	update_all = true;
+}
+CVideo::CVideo() : bpp(0), fake_screen(false)
+{
+	const int res = SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_NOPARACHUTE);
 
 	if(res < 0) {
 		std::cerr << "Could not initialize SDL: " << SDL_GetError() << "\n";
 		throw CVideo::error();
 	}
-
-	for(int i = 0; i != sizeof(text_); ++i) {
-		text_[i] = text[i];
-	}
 }
 
-CVideo::CVideo( int x, int y, int bits_per_pixel, int flags, const char* text )
-		 : frameBuffer(NULL)
+CVideo::CVideo( int x, int y, int bits_per_pixel, int flags)
+		 : bpp(0), fake_screen(false)
 {
 	const int res = SDL_Init( SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_NOPARACHUTE);
 	if(res < 0) {
-		throw error();
+		std::cerr << "Could not initialize SDL: " << SDL_GetError() << "\n";
+		throw CVideo::error();
 	}
 
-	setMode( x, y, bits_per_pixel, flags );
-
-	for(int i = 0; i != sizeof(text_); ++i) {
-		text_[i] = text[i];
+	const int mode_res = setMode( x, y, bits_per_pixel, flags );
+	if (mode_res == 0) {
+		std::cerr << "Could not set Video Mode\n";
+		throw CVideo::error();
 	}
 }
 
 CVideo::~CVideo()
 {
+	std::cerr << "calling SDL_Quit()\n";
 	SDL_Quit();
+	std::cerr << "called SDL_Quit()\n";
+}
+
+void CVideo::make_fake()
+{
+	fake_screen = true;
+	frameBuffer = SDL_CreateRGBSurface(SDL_SWSURFACE,1,1,24,0xFF0000,0xFF00,0xFF,0);
+	image::set_pixel_format(frameBuffer->format);
 }
 
 int CVideo::modePossible( int x, int y, int bits_per_pixel, int flags )
@@ -118,6 +238,8 @@ int CVideo::modePossible( int x, int y, int bits_per_pixel, int flags )
 
 int CVideo::setMode( int x, int y, int bits_per_pixel, int flags )
 {
+	update_rects.clear();
+
 	flags = get_flags(flags);
 	const int res = SDL_VideoModeOK( x, y, bits_per_pixel, flags );
 
@@ -128,8 +250,16 @@ int CVideo::setMode( int x, int y, int bits_per_pixel, int flags )
 	frameBuffer = SDL_SetVideoMode( x, y, bits_per_pixel, flags );
 
 	if( frameBuffer != NULL ) {
+		image::set_pixel_format(frameBuffer->format);
 		return bits_per_pixel;
 	} else	return 0;
+}
+
+int CVideo::setGamma(float gamma)
+{
+	SDL_SetGamma(gamma, gamma, gamma);
+
+	return 0;
 }
 
 int CVideo::getx() const
@@ -169,7 +299,25 @@ int CVideo::getBlueMask()
 
 void CVideo::flip()
 {
-	::SDL_Flip(frameBuffer);
+	if(fake_screen)
+		return;
+
+	halo::render();
+	events::raise_volatile_draw_event();
+	font::draw_floating_labels(frameBuffer);
+	cursor::draw(frameBuffer);
+	if(update_all) {
+		::SDL_Flip(frameBuffer);
+	} else if(update_rects.empty() == false) {
+		SDL_UpdateRects(frameBuffer,update_rects.size(),&update_rects[0]);
+	}
+
+	clear_updates();
+
+	cursor::undraw(frameBuffer);
+	font::undraw_floating_labels(frameBuffer);
+	events::raise_volatile_undraw_event();
+	halo::unrender();
 }
 
 void CVideo::lock()
@@ -196,53 +344,12 @@ SDL_Surface* CVideo::getSurface( void )
 
 bool CVideo::isFullScreen() const { return fullScreen; }
 
-namespace {
-	int disallow_resize = 0;
+void CVideo::setBpp( int bpp )
+{
+	this->bpp = bpp;
 }
 
-resize_lock::resize_lock()
+int CVideo::getBpp( void )
 {
-	++disallow_resize;
-}
-
-resize_lock::~resize_lock()
-{
-	--disallow_resize;
-}
-
-void pump_events()
-{
-	SDL_PumpEvents();
-
-	static std::pair<int,int> resize_dimensions(0,0);
-
-	SDL_Event event;
-	while(SDL_PollEvent(&event)) {
-		switch(event.type) {
-			case SDL_VIDEORESIZE: {
-				const SDL_ResizeEvent* const resize
-				              = reinterpret_cast<SDL_ResizeEvent*>(&event);
-
-				if(resize->w < 1024 || resize->h < 768) {
-					resize_dimensions.first = 0;
-					resize_dimensions.second = 0;
-				} else {
-					resize_dimensions.first = resize->w;
-					resize_dimensions.second = resize->h;
-				}
-
-				break;
-			}
-
-			case SDL_QUIT: {
-				throw CVideo::quit();
-			}
-		}
-	}
-
-	if(resize_dimensions.first > 0 && disallow_resize == 0) {
-		preferences::set_resolution(resize_dimensions);
-		resize_dimensions.first = 0;
-		resize_dimensions.second = 0;
-	}
+	return bpp;
 }

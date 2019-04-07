@@ -1,4 +1,4 @@
-/* $Id: scoped_resource.hpp 28 2003-09-19 10:21:25Z zas $ */
+/* $Id: scoped_resource.hpp,v 1.14 2004/06/20 17:13:58 gruikya Exp $ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net
@@ -12,6 +12,8 @@
 */
 #ifndef SCOPED_RESOURCE_H_INCLUDED
 #define SCOPED_RESOURCE_H_INCLUDED
+
+#include <cstdio> //for FILE
 
 /**
 * The util namespace should take all classes which are of a generic type,
@@ -67,7 +69,7 @@ public:
 	* @ param res This is the resource to be managed
 	* @ param rel This is the functor to release the object
   */
-	scoped_resource(resource_type res,release_type rel=release_type())
+	scoped_resource(resource_type res=resource_type(),release_type rel=release_type())
 			: resource(res), release(rel) {}
 
   /**
@@ -102,11 +104,9 @@ public:
   */
 	resource_type operator->() const { return resource; }
 
-	resource_type& assign(const resource_type& o) {
+	void assign(const resource_type& o) {
 		release(resource);
 		resource = o;
-
-		return resource;
 	}
 };
 
@@ -172,6 +172,16 @@ struct scoped_array : public scoped_resource<T*,delete_array>
 {
 	explicit scoped_array(T* p) : scoped_resource<T*,delete_array>(p) {}
 };
+
+/**
+ * This class specializes the scoped_resource to implement scoped FILEs. Not
+ * sure this is the best place to place such an utility, though.
+ */
+struct close_FILE
+{
+	void operator()(FILE* f) const { if(f != NULL) { fclose(f); } }
+};
+typedef scoped_resource<FILE*,close_FILE> scoped_FILE;
 
 }
 

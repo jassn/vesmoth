@@ -1,4 +1,4 @@
-/* $Id: make_translation.cpp 33 2003-09-19 10:34:59Z zas $ */
+/* $Id: make_translation.cpp,v 1.15 2004/04/20 16:14:40 gruikya Exp $ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net
@@ -25,8 +25,7 @@ void process_config(const std::string& element_name, const config& cfg,
 {
 	typedef std::pair<string,string> pair;
 
-	for(map<string,vector<config*> >::const_iterator i =
-	    cfg.children.begin(); i != cfg.children.end(); ++i) {
+	for(config::child_map::const_iterator i = cfg.all_children().begin(); i != cfg.all_children().end(); ++i) {
 		for(vector<config*>::const_iterator j = i->second.begin();
 		    j != i->second.end(); ++j) {
 			process_config(i->first,**j,out);
@@ -36,7 +35,18 @@ void process_config(const std::string& element_name, const config& cfg,
 	const map<string,string>& table = cfg.values;
 	const map<string,string>::const_iterator id = table.find("id");
 
-	if(element_name == "message") {
+	if(element_name == "campaign") {
+		const map<string,string>::const_iterator name = table.find("name");
+		const map<string,string>::const_iterator diff = table.find("difficulty_descriptions");
+		if(name != table.end()) {
+			out.insert(std::pair<string,string>(id->second,name->second));
+		}
+
+		if(diff != table.end()) {
+			out.insert(std::pair<string,string>(id->second + "_difficulties",diff->second));
+		}
+	}
+	else if(element_name == "message" || element_name=="option" ) {
 		const map<string,string>::const_iterator msg = table.find("message");
 
 		if(id == table.end()) {
@@ -129,10 +139,18 @@ void process_config(const std::string& element_name, const config& cfg,
 
 int main()
 {
-	config cfg(preprocess_file("data/game.cfg"));
-
+	const std::string difficulties[3] = { "EASY", "NORMAL", "HARD" };
 	map<string,string> table;
-	process_config("",cfg,table);
+       
+	for (int i = 0; i < 3; i++) {
+		preproc_map defines;
+		defines[difficulties[i]] = preproc_define();
+		
+		config cfg(preprocess_file("data/game.cfg", &defines) + "\n" + preprocess_file("data/translations/", &defines));
+
+		process_config("",cfg,table);
+	}
+	
 	std::cout << "[language]\n\tlanguage=\"Language Name Goes Here\"\n" <<
 	             "id=en  #language code - English=en, French=fr, etc\n";
 	for(map<string,string>::const_iterator i = table.begin();

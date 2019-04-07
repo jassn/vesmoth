@@ -1,4 +1,4 @@
-/* $Id: language.cpp 28 2003-09-19 10:21:25Z zas $ */
+/* $Id: language.cpp,v 1.31 2004/05/29 05:58:40 jbm Exp $ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net
@@ -11,25 +11,79 @@
    See the COPYING file for more details.
 */
 #include "config.hpp"
+#include "font.hpp"
 #include "hotkeys.hpp"
 #include "language.hpp"
 #include "preferences.hpp"
+#include "util.hpp"
 
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
 
-std::map<std::string,std::string> string_table;
+namespace {
+	std::string current_language;
+	string_map strings_;
+}
 
-std::vector<std::string> get_languages(config& cfg)
+symbol_table string_table;
+
+const std::string& symbol_table::operator[](const std::string& key) const
+{
+	const string_map::const_iterator i = strings_.find(key);
+	if(i != strings_.end()) {
+		return i->second;
+	} else {
+		static std::string empty_string;
+		return empty_string;
+	}
+}
+
+const std::string& symbol_table::operator[](const char* key) const
+{
+	return (*this)[std::string(key)];
+}
+
+const std::string& translate_string(const std::string& str)
+{
+	return translate_string_default(str,str);
+}
+
+const std::string& translate_string_default(const std::string& str, const std::string& default_val)
+{
+	const string_map::const_iterator i = strings_.find(str);
+	if(i != strings_.end() && i->second != "") {
+		return i->second;
+	} else {
+		//if there are spaces, try searching for a no-space version
+		if(std::find(str.begin(),str.end(),' ') != str.end()) {
+			std::string str_copy = str;
+			str_copy.erase(std::remove(str_copy.begin(),str_copy.end(),' '),str_copy.end());
+			return translate_string_default(str_copy,default_val);
+		}
+
+		return default_val;
+	}
+}
+
+std::vector<std::string> get_languages()
 {
 	std::vector<std::string> res;
 
-	const std::vector<config*>& lang = cfg.children["language"];
-	for(std::vector<config*>::const_iterator i = lang.begin();
-	    i != lang.end(); ++i) {
-		res.push_back((*i)->values["language"]);
+	config cfg;
+
+	try {
+		cfg.read(preprocess_file("data/translations/",NULL,NULL));
+	} catch(config::error& e) {
+		std::cerr << "could not open translations: '" << e.message << "' -- defaulting to English only\n";
+		res.push_back("English");
+		return res;
+	}
+
+	const config::child_list& lang = cfg.get_children("language");
+	for(config::child_list::const_iterator i = lang.begin(); i != lang.end(); ++i) {
+		res.push_back((**i)["language"]);
 	}
 
 	return res;
@@ -38,17 +92,20 @@ std::vector<std::string> get_languages(config& cfg)
 namespace {
 bool internal_set_language(const std::string& locale, config& cfg)
 {
-	const std::vector<config*>& lang = cfg.children["language"];
-	for(std::vector<config*>::const_iterator i = lang.begin();
-	    i != lang.end(); ++i) {
-		if((*i)->values["id"] == locale || (*i)->values["language"] == locale) {
+	const config::child_list& lang = cfg.get_children("language");
+	for(config::child_list::const_iterator i = lang.begin(); i != lang.end(); ++i) {
+		if((**i)["id"] == locale || (**i)["language"] == locale) {
 
-			for(std::map<std::string,std::string>::const_iterator j =
-			    (*i)->values.begin(); j != (*i)->values.end(); ++j) {
-				string_table[j->first] = j->second;
+			current_language = (**i)["language"];
+
+			for(string_map::const_iterator j = (*i)->values.begin(); j != (*i)->values.end(); ++j) {
+				strings_[j->first] = j->second;
 			}
 
-			add_hotkeys(**i);
+			hotkey::add_hotkeys(**i,false);
+
+			font::set_font((**i)["font"]);
+
 			return true;
 		}
 	}
@@ -57,14 +114,38 @@ bool internal_set_language(const std::string& locale, config& cfg)
 }
 }
 
-bool set_language(const std::string& locale, config& cfg)
+bool set_language(const std::string& locale)
 {
-	string_table.clear();
+	strings_.clear();
 
-	//default to English locale first, then set desired locale
-	internal_set_language("en",cfg);
+	std::string locale_lc;
+	locale_lc.resize(locale.size());
+	std::transform(locale.begin(),locale.end(),locale_lc.begin(),tolower);
+
+	config cfg;
+	if(locale_lc == "en" || locale_lc == "english") {
+		try {
+			cfg.read(preprocess_file("data/translations/english.cfg"));
+		} catch(config::error& e) {
+			std::cerr << "Could not read english.cfg\n";
+			throw e;
+		}
+	} else {
+		try {
+			cfg.read(preprocess_file("data/translations/"));
+			
+			//default to English locale first, then set desired locale
+			internal_set_language("en",cfg);
+		} catch(config::error& e) {
+			std::cerr << "error opening translations: '" << e.message << "' Defaulting to English\n";
+			return set_language("english");
+		}
+	}
+
 	return internal_set_language(locale,cfg);
 }
+
+const std::string& get_language() { return current_language; }
 
 std::string get_locale()
 {
@@ -89,3 +170,163 @@ std::string get_locale()
 	std::cerr << "locale could not be determined; defaulting to locale 'en'\n";
 	return "en";
 }
+
+class invalid_utf8_exception : public std::exception {
+};
+
+namespace 
+{
+std::string wstring_to_utf8(const wide_string &src)
+{
+    wchar_t ch;
+	wide_string::const_iterator i;
+	int j;
+	Uint32 bitmask;
+	std::string ret;
+
+	try {
+
+		for(i = src.begin(); i != src.end(); ++i) {
+			int count;
+			ch = *i;
+			
+			/* Determine the bytes required */
+			count = 1;
+			if(ch >= 0x80)
+				count++;
+
+			bitmask = 0x800;
+			for(j = 0; j < 5; ++j) {
+				if(ch >= bitmask)
+					count++;
+				bitmask <<= 5;
+			}
+			
+			if(count > 6)
+				throw invalid_utf8_exception();
+
+			if(count == 1) {
+				push_back(ret,ch);
+			} else {
+				for(j = count-1; j >= 0; --j) {
+					unsigned char c = (ch >> (6*j)) & 0x3f;
+					c |= 0x80;
+					if(j == count-1)
+						c |= 0xff << (8 - count);
+					push_back(ret,c);
+				}
+			}
+
+		}
+
+		return ret;
+	}
+	catch(invalid_utf8_exception e) {
+		std::cerr << "Invalid wide character string\n";
+		return ret;
+	}
+}
+
+int byte_size_from_utf8_first(unsigned char ch)
+{
+	int count;
+
+	if ((ch & 0x80) == 0)
+		count = 1;
+	else if ((ch & 0xE0) == 0xC0)
+		count = 2;
+	else if ((ch & 0xF0) == 0xE0)
+		count = 3;
+	else if ((ch & 0xF8) == 0xF0)
+		count = 4;
+	else if ((ch & 0xFC) == 0xF8)
+		count = 5;
+	else if ((ch & 0xFE) == 0xFC)
+		count = 6;
+	else
+		throw invalid_utf8_exception(); /* stop on invalid characters */
+
+	return count;
+}
+	
+wide_string utf8_to_wstring(const std::string &src)
+{
+	wide_string ret;	
+	wchar_t ch;
+	std::string::const_iterator i;
+	
+	try {
+		for(i = src.begin(); i != src.end(); ++i ) {
+			ch = (unsigned char)*i;
+			const int count = byte_size_from_utf8_first(ch);
+					
+			if(i + count - 1 == src.end())
+				throw invalid_utf8_exception();
+
+			/* Convert the first character */
+			if (count != 1) {
+				ch &= 0xFF >> (count + 1);
+			}
+			
+			/* Convert the continuation bytes */
+			for(std::string::const_iterator j = i+1; j != i+count; ++j) {
+				if((*j & 0xC0) != 0x80)
+					throw invalid_utf8_exception();
+				
+				ch = (ch << 6) | (*j & 0x3F);
+			}
+			i += (count - 1);
+			
+			push_back(ret,ch);
+		}
+	}
+	catch(invalid_utf8_exception e) {
+		std::cerr << "Invalid UTF-8 string: \"" << src << "\"\n";
+		return ret;
+	}
+
+	return ret;
+}
+
+}
+
+std::vector<std::string> split_utf8_string(const std::string &src)
+{
+	std::vector<std::string> ret;
+	
+	try {
+		for(size_t i = 0; i < src.size(); /* nop */) {
+			const int size = byte_size_from_utf8_first(src[i]);
+			if(i + size > src.size())
+				throw invalid_utf8_exception();
+
+			ret.push_back(src.substr(i, size));
+			i += size;
+		}
+	}
+	
+	catch(invalid_utf8_exception e) {
+		std::cerr << "Invalid UTF-8 string: \"" << src << "\"\n";
+		return ret;
+	}
+
+	return ret;
+}
+
+std::string wstring_to_string(const wide_string &src)
+{
+	return wstring_to_utf8(src);
+}
+
+std::string wchar_to_string(const wchar_t c) {
+	wide_string s;
+	s.push_back(c);
+	return wstring_to_utf8(s);
+}
+
+wide_string string_to_wstring(const std::string &src)
+{
+	return utf8_to_wstring(src);
+}
+
+

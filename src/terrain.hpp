@@ -1,4 +1,4 @@
-/* $Id: terrain.hpp 74 2003-09-21 13:00:52Z Sirp $ */
+/* $Id: terrain.hpp,v 1.19 2004/06/07 19:18:27 gruikya Exp $ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net
@@ -22,31 +22,60 @@ class terrain_type
 {
 public:
 	terrain_type();
-	terrain_type(config& cfg);
+	terrain_type(const config& cfg);
 
-	const std::string& image(int x, int y) const;
+	//const std::string& image(int x, int y) const;
 	const std::string& default_image() const;
+	const std::string& adjacent_image() const;
 	const std::string& name() const;
+
+	//the character representing this terrain
 	char letter() const;
-	char type() const;
+
+	//the underlying type of the terrain
+	const std::string& type() const;
 
 	pixel_data get_rgb() const;
 
+	bool is_light() const;
 	bool is_alias() const;
+
+	int unit_height_adjust() const;
+	double unit_submerge() const;
+
+	//whether the terrain's overlay precedence is equal (rather than higher
+	//than) the preceeding terrain
+	bool equal_precedence() const;
+
+	bool gives_healing() const;
+	bool is_village() const;
+	bool is_castle() const;
+	bool is_keep() const;
+
 private:
 	std::vector<std::string> images_;
+	std::string adjacent_image_;
 	std::string name_;
 
 	//the 'letter' is the letter that represents this
-	//terrain type. The 'type' is the letter of the
-	//terrain type which this is equivalent to, which
-	//may be the same as 'letter'
-	char type_, letter_;
+	//terrain type. The 'type' is a list of the 'underlying types'
+	//of the terrain. This may simply be the same as the letter.
+	char letter_;
+	std::string type_;
 
 	pixel_data colour_;
+
+	int height_adjust_;
+
+	double submerge_;
+
+	bool equal_precedence_;
+	bool is_light_;
+
+	bool heals_, village_, castle_, keep_;
 };
 
-void create_terrain_maps(std::vector<config*>& cfgs,
+void create_terrain_maps(const std::vector<config*>& cfgs,
                          std::vector<char>& terrain_precedence,
                          std::map<char,terrain_type>& letter_to_terrain,
 						 std::map<std::string,terrain_type>& str_to_terrain);

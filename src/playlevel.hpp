@@ -1,4 +1,4 @@
-/* $Id: playlevel.hpp 28 2003-09-19 10:21:25Z zas $ */
+/* $Id: playlevel.hpp,v 1.16 2004/06/11 04:07:37 Sirp Exp $ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net
@@ -21,8 +21,8 @@
 #include "game_config.hpp"
 #include "gamestatus.hpp"
 #include "key.hpp"
-#include "menu.hpp"
 #include "pathfind.hpp"
+#include "show_dialog.hpp"
 #include "team.hpp"
 #include "unit_types.hpp"
 #include "unit.hpp"
@@ -34,7 +34,7 @@
 #include <sstream>
 #include <string>
 
-enum LEVEL_RESULT { VICTORY, DEFEAT, QUIT, REPLAY };
+enum LEVEL_RESULT { VICTORY, DEFEAT, QUIT, LEVEL_CONTINUE, LEVEL_CONTINUE_NO_SAVE };
 
 struct end_level_exception {
 	end_level_exception(LEVEL_RESULT res, bool bonus=true)
@@ -44,9 +44,9 @@ struct end_level_exception {
 	bool gold_bonus;
 };
 
-LEVEL_RESULT play_level(game_data& gameinfo, config& terrain_config,
+LEVEL_RESULT play_level(game_data& gameinfo, const config& terrain_config,
                         config* level, CVideo& video,
                         game_state& state_of_game,
-						std::vector<config*>& story);
+						const std::vector<config*>& story);
 
 #endif

@@ -1,4 +1,4 @@
-/* $Id: display.cpp 116 2003-09-30 09:18:24Z Sirp $ */
+/* $Id: display.cpp,v 1.230 2004/06/26 00:31:23 Sirp Exp $ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net
@@ -10,17 +10,25 @@
 
    See the COPYING file for more details.
 */
+
 #include "actions.hpp"
 #include "display.hpp"
+#include "events.hpp"
 #include "font.hpp"
 #include "game.hpp"
 #include "game_config.hpp"
+#include "halo.hpp"
 #include "hotkeys.hpp"
+#include "image.hpp"
 #include "language.hpp"
 #include "log.hpp"
-#include "menu.hpp"
+#include "preferences.hpp"
 #include "sdl_utils.hpp"
+#include "show_dialog.hpp"
 #include "sound.hpp"
+#include "team.hpp"
+#include "tooltips.hpp"
+#include "unit_display.hpp"
 #include "util.hpp"
 
 #include "SDL_image.h"
@@ -34,92 +42,138 @@
 std::map<gamemap::location,double> display::debugHighlights_;
 
 namespace {
-	const double DefaultZoom = 70.0;
+	const int MinZoom = 36;
+	const int DefaultZoom = 72;
+	const int MaxZoom = 200;
 
-	display::Pixel alpha_blend_pixels(display::Pixel p1, display::Pixel p2,
-	                         const SDL_PixelFormat* fmt, double alpha)
-	{
-		const int r1 = ((p1&fmt->Rmask) >> fmt->Rshift) << fmt->Rloss;
-		const int g1 = ((p1&fmt->Gmask) >> fmt->Gshift) << fmt->Gloss;
-		const int b1 = ((p1&fmt->Bmask) >> fmt->Bshift) << fmt->Bloss;
+	const size_t SideBarGameStatus_x = 16;
+	const size_t SideBarGameStatus_y = 220;
 
-		const int r2 = ((p2&fmt->Rmask) >> fmt->Rshift) << fmt->Rloss;
-		const int g2 = ((p2&fmt->Gmask) >> fmt->Gshift) << fmt->Gloss;
-		const int b2 = ((p2&fmt->Bmask) >> fmt->Bshift) << fmt->Bloss;
-
-		int r = int(r1*alpha);
-		int g = int(g1*alpha);
-		int b = int(b1*alpha);
-
-		if(alpha < 1.0) {
-			r += int(r2*(1.0-alpha));
-			g += int(g2*(1.0-alpha));
-			b += int(b2*(1.0-alpha));
-		} else {
-			if(r > r2)
-				r = r2;
-
-			if(g > g2)
-				g = g2;
-
-			if(b > b2)
-				b = b2;
-		}
-
-		return ((r >> fmt->Rloss) << fmt->Rshift) |
-		       ((g >> fmt->Gloss) << fmt->Gshift) |
-		       ((b >> fmt->Bloss) << fmt->Bshift);
-	}
+	const SDL_Rect empty_rect = {0,0,0,0};
 }
 
 display::display(unit_map& units, CVideo& video, const gamemap& map,
-				 const gamestatus& status, const std::vector<team>& t)
-		             : screen_(video), xpos_(0.0), ypos_(0.0),
+				 const gamestatus& status, const std::vector<team>& t, const config& theme_cfg,
+				 const config& built_terrains)
+		             : screen_(video), xpos_(0), ypos_(0),
 					   zoom_(DefaultZoom), map_(map), units_(units),
-					   energy_bar_count_(-1,-1), minimap_(NULL),
-					   minimapDecorationsDrawn_(false),
+					   minimap_(NULL), redrawMinimap_(false),
 					   pathsList_(NULL), status_(status),
                        teams_(t), lastDraw_(0), drawSkips_(0),
 					   invalidateAll_(true), invalidateUnit_(true),
-					   invalidateGameStatus_(true), sideBarBgDrawn_(false),
-					   lastTimeOfDay_(-1), currentTeam_(0), updatesLocked_(0),
-                       turbo_(false), grid_(false), sidebarScaling_(1.0)
+					   invalidateGameStatus_(true), panelsDrawn_(false),
+					   currentTeam_(0), activeTeam_(0), hideEnergy_(false),
+					   deadAmount_(0.0), advancingAmount_(0.0), updatesLocked_(0),
+                       turbo_(false), grid_(false), sidebarScaling_(1.0),
+					   theme_(theme_cfg,screen_area()), builder_(built_terrains, map),
+					   first_turn_(true), in_game_(false), map_labels_(*this,map),
+					   tod_hex_mask1(NULL), tod_hex_mask2(NULL), diagnostic_label_(0),
+					   help_string_(0)
 {
+	if(non_interactive())
+		updatesLocked_++;
+
+	std::fill(reportRects_,reportRects_+reports::NUM_REPORTS,empty_rect);
+
+	image::set_zoom(zoom_);
+
 	gameStatusRect_.w = 0;
 	unitDescriptionRect_.w = 0;
 	unitProfileRect_.w = 0;
 
 	//clear the screen contents
 	SDL_Surface* const disp = screen_.getSurface();
-	const int length = disp->w*disp->h;
-
-	surface_lock lock(disp);
-	short* const pixels = lock.pixels();
-	std::fill(pixels,pixels+length,0);
-}
-
-void clear_surfaces(std::map<std::string,SDL_Surface*>& surfaces)
-{
-	for(std::map<std::string,SDL_Surface*>::iterator i = surfaces.begin();
-					i != surfaces.end(); ++i) {
-		SDL_FreeSurface(i->second);
-	}
-
-	surfaces.clear();
+	SDL_Rect area = screen_area();
+	SDL_FillRect(disp,&area,SDL_MapRGB(disp->format,0,0,0));
 }
 
 display::~display()
 {
-	clear_surfaces(images_);
-	clear_surfaces(scaledImages_);
-	clear_surfaces(greyedImages_);
-	clear_surfaces(brightenedImages_);
 	SDL_FreeSurface(minimap_);
+	prune_chat_messages(true);
+}
+
+Uint32 display::rgb(Uint8 red, Uint8 green, Uint8 blue)
+{
+	return 0xFF000000 | (red << 16) | (green << 8) | blue;
+}
+
+void display::new_turn()
+{
+	const time_of_day& tod = status_.get_time_of_day();
+
+	if(!turbo() && !first_turn_) {
+		image::set_image_mask("");
+
+		const time_of_day& old_tod = status_.get_previous_time_of_day();
+
+		if(old_tod.image_mask != tod.image_mask) {
+			const scoped_sdl_surface old_mask(image::get_image(old_tod.image_mask,image::UNMASKED));
+			const scoped_sdl_surface new_mask(image::get_image(tod.image_mask,image::UNMASKED));
+
+			const int niterations = 10;
+			const int frame_time = 30;
+			const int starting_ticks = SDL_GetTicks();
+			for(int i = 0; i != niterations; ++i) {
+
+				if(old_mask != NULL) {
+					const double proportion = 1.0 - double(i)/double(niterations);
+					tod_hex_mask1.assign(adjust_surface_alpha(old_mask,proportion));
+				}
+
+				if(new_mask != NULL) {
+					const double proportion = double(i)/double(niterations);
+					tod_hex_mask2.assign(adjust_surface_alpha(new_mask,proportion));
+				}
+
+				invalidate_all();
+				draw();
+
+				const int cur_ticks = SDL_GetTicks();
+				const int wanted_ticks = starting_ticks + i*frame_time;
+				if(cur_ticks < wanted_ticks) {
+					SDL_Delay(wanted_ticks - cur_ticks);
+				}
+			}	
+		}
+
+		tod_hex_mask1.assign(NULL);
+		tod_hex_mask2.assign(NULL);
+	}
+
+	first_turn_ = false;
+
+	image::set_colour_adjustment(tod.red,tod.green,tod.blue);
+	image::set_image_mask(tod.image_mask);
+}
+
+void display::adjust_colours(int r, int g, int b)
+{
+	const time_of_day& tod = status_.get_time_of_day();
+	image::set_colour_adjustment(tod.red+r,tod.green+g,tod.blue+b);
+}
+
+gamemap::location display::hide_unit(const gamemap::location& loc, bool hide_energy)
+{
+	const gamemap::location res = hiddenUnit_;
+	hiddenUnit_ = loc;
+	hideEnergy_ = hide_energy;
+	return res;
 }
 
 int display::x() const { return screen_.getx(); }
 int display::mapx() const { return x() - 140; }
 int display::y() const { return screen_.gety(); }
+
+const SDL_Rect& display::map_area() const
+{
+	return theme_.main_map_location(screen_area());
+}
+
+const SDL_Rect& display::minimap_area() const
+{
+	return theme_.mini_map_location(screen_area());
+}
 
 SDL_Rect display::screen_area() const
 {
@@ -129,6 +183,10 @@ SDL_Rect display::screen_area() const
 
 void display::select_hex(gamemap::location hex)
 {
+	if(team_valid() && teams_[currentTeam_].fogged(hex.x,hex.y)) {
+		return;
+	}
+
 	invalidate(selectedHex_);
 	selectedHex_ = hex;
 	invalidate(selectedHex_);
@@ -150,66 +208,94 @@ void display::highlight_hex(gamemap::location hex)
 
 gamemap::location display::hex_clicked_on(int xclick, int yclick)
 {
-	if(xclick > mapx())
+	const SDL_Rect& rect = map_area();
+	if(point_in_rect(xclick,yclick,rect) == false) {
 		return gamemap::location();
+	}
 
-	const double xtile = xpos_/(zoom_*0.75) +
-			               static_cast<double>(xclick)/(zoom_*0.75) - 0.25;
-	const double ytile = ypos_/zoom_ + static_cast<double>(yclick)/zoom_
-	                      + (is_odd(int(xtile)) ? -0.5:0.0);
+	xclick -= rect.x;
+	yclick -= rect.y;
 
-	return gamemap::location(static_cast<int>(xtile),static_cast<int>(ytile));
+	const int tile_width = hex_width();
+
+	const int xtile = (xpos_ + xclick)/tile_width;
+	const int ytile = (ypos_ + yclick - (is_odd(xtile) ? zoom_/2 : 0))/zoom_; //(yclick + is_odd(xtile) ? -yclick/2 : 0)/zoom_;
+
+	return gamemap::location(xtile,ytile);
+}
+
+int display::get_location_x(const gamemap::location& loc) const
+{
+	return map_area().x + loc.x*hex_width() - xpos_;
+}
+
+int display::get_location_y(const gamemap::location& loc) const
+{
+	return map_area().y + loc.y*zoom_ - ypos_ + (is_odd(loc.x) ? zoom_/2 : 0);
 }
 
 gamemap::location display::minimap_location_on(int x, int y)
 {
-	const SDL_Rect rect =
-	      get_minimap_location(mapx()+30,35,(this->x()-mapx())-60,120);
+	const SDL_Rect rect = minimap_area();
 
 	if(x < rect.x || y < rect.y ||
 	   x >= rect.x + rect.w || y >= rect.y + rect.h) {
 		return gamemap::location();
 	}
 
-	const int xdiv = rect.w / map_.x();
-	const int ydiv = rect.h / map_.y();
+	const double xdiv = double(rect.w) / double(map_.x());
+	const double ydiv = double(rect.h) / double(map_.y());
 
-	return gamemap::location((x - rect.x)/xdiv,(y-rect.y)/ydiv);
+	return gamemap::location(int((x - rect.x)/xdiv),int((y-rect.y)/ydiv));
 }
 
-display::Pixel display::rgb(int r, int g, int b) const
+void display::scroll(int xmove, int ymove)
 {
-	return SDL_MapRGB(const_cast<display*>(this)->video().getSurface()->format,
-	                  r,g,b);
-}
-
-void display::scroll(double xmove, double ymove)
-{
-	const double orig_x = xpos_;
-	const double orig_y = ypos_;
+	const int orig_x = xpos_;
+	const int orig_y = ypos_;
 	xpos_ += xmove;
 	ypos_ += ymove;
 	bounds_check_position();
 
 	//only invalidate if we've actually moved
-	if(orig_x != xpos_ || orig_y != ypos_)
+	if(orig_x != xpos_ || orig_y != ypos_) {
+		map_labels_.scroll(orig_x - xpos_, orig_y - ypos_);
+		font::scroll_floating_labels(orig_x - xpos_, orig_y - ypos_);
 		invalidate_all();
+	}
 }
 
-void display::zoom(double amount)
+int display::hex_size() const
 {
-	clear_surfaces(scaledImages_);
-	clear_surfaces(greyedImages_);
-	clear_surfaces(brightenedImages_);
-	energy_bar_count_ = std::pair<int,int>(-1,-1);
+	return zoom_;
+}
+
+int display::hex_width() const
+{
+	return (zoom_*3)/4;
+}
+
+double display::zoom(int amount)
+{
+	if(amount == 0 || !team_valid()) {
+		return double(zoom_)/double(DefaultZoom);
+	}
+
+	const int orig_xpos = xpos_;
+	const int orig_ypos = ypos_;
 
 	xpos_ /= zoom_;
 	ypos_ /= zoom_;
 
-	const double max_zoom = 200.0;
+	const int orig_zoom = zoom_;
+
 	zoom_ += amount;
-	if(zoom_ > max_zoom)
-		zoom_ = max_zoom;
+	if(zoom_ < MinZoom || zoom_ > MaxZoom) {
+		zoom_ = orig_zoom;
+		xpos_ = orig_xpos;
+		ypos_ = orig_ypos;
+		return double(zoom_)/double(DefaultZoom);
+	}
 
 	xpos_ *= zoom_;
 	ypos_ *= zoom_;
@@ -217,9 +303,24 @@ void display::zoom(double amount)
 	xpos_ += amount*2;
 	ypos_ += amount*2;
 
+	const int prev_zoom = zoom_;
+
 	bounds_check_position();
 
+	if(zoom_ != prev_zoom) {
+		xpos_ = orig_xpos;
+		ypos_ = orig_ypos;
+		zoom_ = orig_zoom;
+		return double(zoom_)/double(DefaultZoom);
+	}
+
+	energy_bar_rects_.clear();
+
+	image::set_zoom(zoom_);
+	map_labels_.recalculate_labels();
 	invalidate_all();
+
+	return double(zoom_)/double(DefaultZoom);
 }
 
 void display::default_zoom()
@@ -227,48 +328,43 @@ void display::default_zoom()
 	zoom(DefaultZoom - zoom_);
 }
 
-void display::scroll_to_tile(int x, int y, SCROLL_TYPE scroll_type)
+void display::scroll_to_tile(int x, int y, SCROLL_TYPE scroll_type, bool check_fogged)
 {
-	if(update_locked())
+	if(update_locked() || (check_fogged && fogged(x,y)))
 		return;
 
-	const double xpos = static_cast<double>(x)*zoom_*0.75 - xpos_;
-	const double ypos = static_cast<double>(y)*zoom_ - ypos_ +
-					                    ((x % 2) == 1 ? zoom_/2.0 : 0.0);
+	const gamemap::location loc(x,y);
 
-	const double speed = 50.0;
+	if(map_.on_board(loc) == false)
+		return;
 
-	const double desiredxpos = this->mapx()/2.0 - zoom_/2.0;
-	const double desiredypos = this->   y()/2.0 - zoom_/2.0;
+	const int xpos = get_location_x(loc);
+	const int ypos = get_location_y(loc);
 
-	const double xmove = xpos - desiredxpos;
-	const double ymove = ypos - desiredypos;
+	const int speed = preferences::scroll_speed()*2;
 
-	int num_moves = static_cast<int>((fabs(xmove) > fabs(ymove) ?
-	                                  fabs(xmove):fabs(ymove))/speed);
+	const SDL_Rect& area = map_area();
+	const int desiredxpos = area.w/2 - zoom_/2;
+	const int desiredypos = area.h/2 - zoom_/2;
+
+	const int xmove = xpos - desiredxpos;
+	const int ymove = ypos - desiredypos;
+
+	int num_moves = (abs(xmove) > abs(ymove) ? abs(xmove):abs(ymove))/speed;
 
 	if(scroll_type == WARP || turbo())
 		num_moves = 1;
 
-	const double divisor = static_cast<double>(num_moves);
-
-	double xdiff = 0.0, ydiff = 0.0;
-
 	for(int i = 0; i != num_moves; ++i) {
-		check_keys(*this);
-		xdiff += xmove/divisor;
-		ydiff += ymove/divisor;
+		events::pump();
 
 		//accelerate scroll rate if either shift key is held down
 		if((i%4) != 0 && i != num_moves-1 && turbo()) {
 			continue;
 		}
 
-		scroll(xdiff,ydiff);
+		scroll(xmove/num_moves,ymove/num_moves);
 		draw();
-
-		xdiff = 0.0;
-		ydiff = 0.0;
 	}
 
 	invalidate_all();
@@ -276,120 +372,171 @@ void display::scroll_to_tile(int x, int y, SCROLL_TYPE scroll_type)
 }
 
 void display::scroll_to_tiles(int x1, int y1, int x2, int y2,
-                              SCROLL_TYPE scroll_type)
+                              SCROLL_TYPE scroll_type, bool check_fogged)
 {
-	const double xpos1 = static_cast<double>(x1)*zoom_*0.75 - xpos_;
-	const double ypos1 = static_cast<double>(y1)*zoom_ - ypos_ +
-					                    ((x1 % 2) == 1 ? zoom_/2.0 : 0.0);
-	const double xpos2 = static_cast<double>(x2)*zoom_*0.75 - xpos_;
-	const double ypos2 = static_cast<double>(y2)*zoom_ - ypos_ +
-					                    ((x2 % 2) == 1 ? zoom_/2.0 : 0.0);
+	const gamemap::location loc1(x1,y1), loc2(x2,y2);
+	const int xpos1 = get_location_x(loc1);
+	const int ypos1 = get_location_y(loc1);
+	const int xpos2 = get_location_x(loc2);;
+	const int ypos2 = get_location_y(loc2);;
 
-	const double diffx = fabs(xpos1 - xpos2);
-	const double diffy = fabs(ypos1 - ypos2);
+	const int diffx = abs(xpos1 - xpos2);
+	const int diffy = abs(ypos1 - ypos2);
 
-	if(diffx > mapx()/(zoom_*0.75) || diffy > y()/zoom_) {
-		scroll_to_tile(x1,y1,scroll_type);
+	if(diffx > map_area().w/hex_width() || diffy > map_area().h/zoom_) {
+		scroll_to_tile(x1,y1,scroll_type,check_fogged);
 	} else {
-		scroll_to_tile((x1+x2)/2,(y1+y2)/2,scroll_type);
+		scroll_to_tile((x1+x2)/2,(y1+y2)/2,scroll_type,check_fogged);
 	}
 }
 
 void display::bounds_check_position()
 {
-	const double min_zoom1 = static_cast<double>(mapx()/(map_.x()*0.75 + 0.25));
-	const double min_zoom2 = static_cast<double>(y()/map_.y());
-	const double min_zoom = min_zoom1 > min_zoom2 ? min_zoom1 : min_zoom2;
-	const double max_zoom = 200.0;
+	const int min_zoom1 = map_area().w/((map_.x()*3)/4);
+	const int min_zoom2 = map_area().h/map_.y();
+	const int min_zoom = maximum<int>(min_zoom1,min_zoom2);
 
-	zoom_ = floor(zoom_);
+	const int orig_zoom = zoom_;
 
-	if(zoom_ < min_zoom)
+	if(zoom_ < min_zoom) {
 		zoom_ = min_zoom;
+	}
 
-	if(zoom_ > max_zoom)
-		zoom_ = max_zoom;
+	if(zoom_ > MaxZoom) {
+		zoom_ = MaxZoom;
+	}
 
-	const double xend = zoom_*map_.x()*0.75 + zoom_*0.25;
-	const double yend = zoom_*map_.y() + zoom_/2.0;
+	const int tile_width = hex_width();
 
-	if(xpos_ + static_cast<double>(mapx()) > xend)
-		xpos_ -= xpos_ + static_cast<double>(mapx()) - xend;
+	const int xend = tile_width*map_.x() + tile_width/3;
+	const int yend = zoom_*map_.y() + zoom_/2;
 
-	if(ypos_ + static_cast<double>(y()) > yend)
-		ypos_ -= ypos_ + static_cast<double>(y()) - yend;
+	if(xpos_ + map_area().w > xend)
+		xpos_ -= xpos_ + map_area().w - xend;
 
-	if(xpos_ < 0.0)
-		xpos_ = 0.0;
+	if(ypos_ + map_area().h > yend)
+		ypos_ -= ypos_ + map_area().h - yend;
 
-	if(ypos_ < 0.0)
-		ypos_ = 0.0;
+	if(xpos_ < 0)
+		xpos_ = 0;
+
+	if(ypos_ < 0)
+		ypos_ = 0;
+
+	if(zoom_ != orig_zoom)
+		image::set_zoom(zoom_);
 }
 
 void display::redraw_everything()
 {
-	if(update_locked())
+	if(update_locked() || teams_.empty())
 		return;
 
-	lastTimeOfDay_ = gamestatus::NUM_TIMES;
-	sideBarBgDrawn_ = false;
-	minimapDecorationsDrawn_ = false;
+	bounds_check_position();
+
+	for(size_t n = 0; n != reports::NUM_REPORTS; ++n) {
+		reportRects_[n] = empty_rect;
+		reportSurfaces_[n].assign(NULL);
+		reports_[n] = reports::report();
+	}
+
+	tooltips::clear_tooltips();
+
+	theme_.set_resolution(screen_area());
+
+	if(buttons_.empty() == false) {
+		create_buttons();
+	}
+
+	panelsDrawn_ = false;
+
+	map_labels_.recalculate_labels();
+
 	invalidate_all();
 	draw(true,true);
 }
 
-void display::draw(bool update,bool force)
+namespace {
+
+void draw_panel(display& disp, const theme::panel& panel, std::vector<gui::button>& buttons)
 {
-	if(!sideBarBgDrawn_) {
-		SDL_Surface* const screen = screen_.getSurface();
-		SDL_Surface* image = getImage("misc/rightside.png",UNSCALED);
-		if(image != NULL) {
+	log_scope("draw panel");
+	scoped_sdl_surface surf(image::get_image(panel.image(),image::UNSCALED));
 
-			if(image->h != screen->h) {
-				SDL_FreeSurface(image);
-				images_.erase("misc/rightside.png");
-
-				image = getImage("misc/rightside.png",UNSCALED);
-
-				SDL_Surface* const new_image
-				                   = scale_surface(image,image->w,screen->h);
-				if(new_image != NULL) {
-					images_["misc/rightside.png"] = new_image;
-					SDL_FreeSurface(image);
-					image = new_image;
-					sidebarScaling_ = static_cast<double>(image->h)/768.0;
-				} else {
-					std::cerr << "Could not scale image\n";
-				}
-			}
-
-			SDL_Rect dstrect;
-			dstrect.x = mapx();
-			dstrect.y = 0;
-			dstrect.w = image->w;
-			dstrect.h = image->h;
-
-			if(dstrect.x + dstrect.w <= this->x() &&
-			   dstrect.y + dstrect.h <= this->y()) {
-				SDL_BlitSurface(image,NULL,screen,&dstrect);
-			} else {
-				std::cout << (dstrect.x+dstrect.w) << " > " << this->x() << " or " << (dstrect.y + dstrect.h) << " > " << this->y() << "\n";
-			}
-		} else {
-			std::cerr << "could not load 'misc/rightside.png'\n";
-		}
-
-		sideBarBgDrawn_ = true;
+	const SDL_Rect screen = disp.screen_area();
+	SDL_Rect& loc = panel.location(screen);
+	if(surf->w != loc.w || surf->h != loc.h) {
+		surf.assign(scale_surface(surf.get(),loc.w,loc.h));
 	}
 
-	if(invalidateAll_) {
+	disp.blit_surface(loc.x,loc.y,surf);
+	update_rect(loc);
+
+	for(std::vector<gui::button>::iterator b = buttons.begin(); b != buttons.end(); ++b) {
+		if(rects_overlap(b->location(),loc)) {
+			b->set_dirty(true);
+		}
+	}
+}
+
+void draw_label(display& disp, SDL_Surface* target, const theme::label& label)
+{
+	log_scope("draw label");
+
+	const std::string& text = label.text();
+	const std::string& icon = label.icon();
+	SDL_Rect& loc = label.location(disp.screen_area());
+	
+	if(icon.empty() == false) {
+		scoped_sdl_surface surf(image::get_image(icon,image::UNSCALED));
+		if(surf->w != loc.w || surf->h != loc.h) {
+			surf.assign(scale_surface(surf.get(),loc.w,loc.h));
+		}
+
+		SDL_BlitSurface(surf.get(),NULL,target,&loc);
+
+		if(text.empty() == false) {
+			tooltips::add_tooltip(loc,text);
+		}
+	} else if(text.empty() == false) {
+		font::draw_text(&disp,loc,label.font_size(),font::NORMAL_COLOUR,text,loc.x,loc.y);
+	}
+
+
+	update_rect(loc);
+}
+
+}
+
+void display::draw(bool update,bool force)
+{	
+	if(!panelsDrawn_) {
+		SDL_Surface* const screen = screen_.getSurface();
+
+		const std::vector<theme::panel>& panels = theme_.panels();
+		for(std::vector<theme::panel>::const_iterator p = panels.begin(); p != panels.end(); ++p) {
+			draw_panel(*this,*p,buttons_);
+		}
+
+		const std::vector<theme::label>& labels = theme_.labels();
+		for(std::vector<theme::label>::const_iterator i = labels.begin(); i != labels.end(); ++i) {
+			draw_label(*this,screen,*i);
+		}
+		
+		//invalidate the reports so they are redrawn
+		std::fill(reports_,reports_+sizeof(reports_)/sizeof(*reports_),reports::report());
+		invalidateGameStatus_ = true;
+		panelsDrawn_ = true;
+	}
+
+	if(invalidateAll_ && !map_.empty()) {
 		for(int x = -1; x <= map_.x(); ++x)
 			for(int y = -1; y <= map_.y(); ++y)
 				draw_tile(x,y);
 		invalidateAll_ = false;
-		draw_minimap(mapx()+30,35,(this->x()-mapx())-60,
-		                          int(120*sidebarScaling_));
-	} else {
+
+		redrawMinimap_ = true;
+	} else if(!map_.empty()) {
 		for(std::set<gamemap::location>::const_iterator it =
 		    invalidated_.begin(); it != invalidated_.end(); ++it) {
 			draw_tile(it->x,it->y);
@@ -398,7 +545,18 @@ void display::draw(bool update,bool force)
 		invalidated_.clear();
 	}
 
-	draw_sidebar();
+	if(redrawMinimap_) {
+		redrawMinimap_ = false;
+		const SDL_Rect area = minimap_area();
+		draw_minimap(area.x,area.y,area.w,area.h);
+	}
+
+
+	if(!map_.empty()) {
+		draw_sidebar();
+	}
+
+	prune_chat_messages();
 
 	const int max_skips = 5;
 	const int time_between_draws = 20;
@@ -407,7 +565,7 @@ void display::draw(bool update,bool force)
 
 	//force a wait for 10 ms every frame.
 	//TODO: review whether this is the correct thing to do
-	SDL_Delay(maximum(10,wait_time));
+	SDL_Delay(maximum<int>(10,wait_time));
 
 	if(update) {
 		lastDraw_ = SDL_GetTicks();
@@ -416,7 +574,6 @@ void display::draw(bool update,bool force)
 			update_display();
 		else
 			drawSkips_++;
-
 	}
 }
 
@@ -430,23 +587,34 @@ void display::update_display()
 
 void display::draw_sidebar()
 {
+	if(teams_.empty())
+		return;
 
 	if(invalidateUnit_) {
 		//we display the unit the mouse is over if it is over a unit
 		//otherwise we display the unit that is selected
-		std::map<gamemap::location,unit>::const_iterator i
-		                                = units_.find(mouseoverHex_);
-		if(i == units_.end())
-			i = units_.find(selectedHex_);
+		std::map<gamemap::location,unit>::const_iterator i = 
+			find_visible_unit(units_,mouseoverHex_,
+					map_,
+					status_.get_time_of_day().lawful_bonus,
+					teams_,teams_[viewing_team()]);
 
-		if(i != units_.end())
-			draw_unit_details(mapx()+2,int(390*sidebarScaling_),selectedHex_,
-			                  i->second,unitDescriptionRect_,unitProfileRect_);
+		if(i == units_.end() || fogged(i->first.x,i->first.y)) {
+			i = find_visible_unit(units_,selectedHex_,
+					map_,
+					status_.get_time_of_day().lawful_bonus,
+					teams_,teams_[viewing_team()]);
+		}
+
+		if(i != units_.end() && !fogged(i->first.x,i->first.y))
+			for(size_t r = reports::UNIT_REPORTS_BEGIN; r != reports::UNIT_REPORTS_END; ++r)
+				draw_report(reports::TYPE(r));
+
 		invalidateUnit_ = false;
 	}
 
 	if(invalidateGameStatus_) {
-		draw_game_status(mapx()+2,int(258*sidebarScaling_));
+		draw_game_status(mapx()+SideBarGameStatus_x,SideBarGameStatus_y);
 		invalidateGameStatus_ = false;
 	}
 }
@@ -456,158 +624,236 @@ void display::draw_game_status(int x, int y)
 	if(teams_.empty())
 		return;
 
-	SDL_Rect rect;
-	rect.x = x;
-	rect.y = y;
-	rect.w = this->x() - x;
+	for(size_t r = reports::STATUS_REPORTS_BEGIN; r != reports::STATUS_REPORTS_END; ++r) {
+		draw_report(reports::TYPE(r));
+	}	
+}
 
-	gamestatus::TIME timeofday = status_.timeofday();
-	if(mouseoverHex_.valid()) {
-		timeofday = timeofday_at(status_,units_,mouseoverHex_);
-	}
-
-	if(lastTimeOfDay_ != (int)timeofday) {
-		lastTimeOfDay_ = (int)timeofday;
-
-		SDL_Surface* const tod_surface = getImage(
-		         gamestatus::timeofdayDescription(timeofday) + ".png",
-				 UNSCALED);
-
-		if(tod_surface != NULL) {
-			//hardcoded values as to where the time of day image appears
-			blit_surface(mapx() + 21,int(196*sidebarScaling_),tod_surface);
-		}
-	}
-
-	if(gameStatusRect_.w > 0) {
-		SDL_Surface* const screen = screen_.getSurface();
-		SDL_Surface* const background=getImage("misc/rightside.png",UNSCALED);
-
-		if(background == NULL)
+void display::draw_image_for_report(scoped_sdl_surface& img, scoped_sdl_surface& surf, SDL_Rect& rect)
+{
+	SDL_Rect visible_area = get_non_transperant_portion(img);
+	SDL_Rect target = rect;
+	if(visible_area.x != 0 || visible_area.y != 0 || visible_area.w != img->w || visible_area.h != img->h) {
+		if(visible_area.w == 0 || visible_area.h == 0) {
 			return;
-
-		SDL_Rect srcrect = gameStatusRect_;
-		srcrect.x -= mapx();
-		SDL_BlitSurface(background,&srcrect,screen,&gameStatusRect_);
-	}
-
-	int nunits = 0;
-	for(std::map<gamemap::location,unit>::const_iterator uit = units_.begin();
-	    uit != units_.end(); ++uit) {
-		if(uit->second.side() == currentTeam_+1) {
-			++nunits;
-		}
-	}
-
-	const int income = teams_[currentTeam_].income() - nunits;
-
-	std::stringstream details;
-	details << string_table["turn"] << ": " << status_.turn() << "/"
-			<< status_.number_of_turns() << "\n" << string_table["gold"] << ": "
-			<< teams_[currentTeam_].gold() << "\n"
-			<< string_table["villages"] << ": "
-			<< teams_[currentTeam_].towers().size() << "\n"
-			<< string_table["units"] << ": " << nunits << "\n"
-			<< string_table["income"] << ": " << income << "\n";
-
-	if(map_.on_board(mouseoverHex_)) {
-		const gamemap::TERRAIN terrain = map_[mouseoverHex_.x][mouseoverHex_.y];
-		std::string name = map_.terrain_name(terrain);
-		std::string underlying_name = map_.underlying_terrain_name(terrain);
-
-		if(terrain == gamemap::CASTLE &&
-		   map_.is_starting_position(mouseoverHex_)) {
-			name = "keep";
 		}
 
-		const std::string& lang_name = string_table[name];
-		const std::string& underlying_lang_name = string_table[underlying_name];
+		if(visible_area.w > rect.w || visible_area.h > rect.h) {
+			img.assign(get_surface_portion(img,visible_area));
+			img.assign(scale_surface(img,rect.w,rect.h));
+			visible_area.x = 0;
+			visible_area.y = 0;
+			visible_area.w = img->w;
+			visible_area.h = img->h;
+		} else {
+			target.x = rect.x + (rect.w - visible_area.w)/2;
+			target.y = rect.y + (rect.h - visible_area.h)/2;
+			target.w = visible_area.w;
+			target.h = visible_area.h;
+		}
 
-		const std::string& name1 = lang_name.empty() ? name : lang_name;
-		const std::string& name2 = underlying_lang_name.empty() ?
-		                              underlying_name : underlying_lang_name;
-
-		if(name1 != name2)
-			details << name1 << " (" << name2 << ")\n";
-		else
-			details << name1 << "\n";
-
-		const int xhex = mouseoverHex_.x + 1;
-		const int yhex = mouseoverHex_.y + 1;
-
-		details << xhex << ", " << yhex << "\n";
+		SDL_BlitSurface(img,&visible_area,screen_.getSurface(),&target);
 	} else {
-		details << "\n";
+		if(img->w != rect.w || img->h != rect.h) {
+			img.assign(scale_surface(img,rect.w,rect.h));
+		}
+
+		SDL_BlitSurface(img,NULL,screen_.getSurface(),&target);
 	}
+}
 
-	SDL_Rect clipRect;
-	clipRect.x = mapx();
-	clipRect.y = 0;
-	clipRect.w = this->x() - mapx();
-	clipRect.h = this->y();
+void display::draw_report(reports::TYPE report_num)
+{
+	if(!team_valid())
+		return;
 
-	gameStatusRect_ = font::draw_text(this,clipRect,14,font::NORMAL_COLOUR,
-	                                  details.str(),x,y);
+	const theme::status_item* const item = theme_.get_status_item(reports::report_name(report_num));
+	if(item != NULL) {
+
+		reports::report report = reports::generate_report(report_num,map_,
+				units_, teams_,
+		      teams_[viewing_team()],
+				currentTeam_+1,activeTeam_+1,
+				selectedHex_,mouseoverHex_,status_,observers_);
+
+		SDL_Rect& rect = reportRects_[report_num];
+		const SDL_Rect& new_rect = item->location(screen_area());
+
+		//report and its location is unchanged since last time. Do nothing.
+		if(rect == new_rect && reports_[report_num] == report) {
+			return;
+		}
+
+		reports_[report_num] = report;
+
+		scoped_sdl_surface& surf = reportSurfaces_[report_num];
+
+		if(surf != NULL) {
+			SDL_BlitSurface(surf,NULL,screen_.getSurface(),&rect);
+			update_rect(rect);
+		}
+
+		//if the rectangle has just changed, assign the surface to it
+		if(new_rect != rect || surf == NULL) {
+			surf.assign(NULL);
+			rect = new_rect;
+
+			//if the rectangle is present, and we are blitting text, then
+			//we need to backup the surface. (Images generally won't need backing
+			//up unless they are transperant, but that is done later)
+			if(rect.w > 0 && rect.h > 0) {
+				surf.assign(get_surface_portion(screen_.getSurface(),rect));
+				if(reportSurfaces_[report_num] == NULL) {
+					std::cerr << "Could not backup background for report!\n";
+				}
+			}
+
+			update_rect(rect);
+		}
+
+		tooltips::clear_tooltips(rect);
+
+		SDL_Rect area = rect;
+
+		int x = rect.x, y = rect.y;
+		if(!report.empty()) {
+			// Add prefix, postfix elements. Make sure that they get the same tooltip as the guys
+			// around them.
+			std::string str = item->prefix();
+			if(str.empty() == false) {
+				report.insert(report.begin(), reports::element(str,"",report.begin()->tooltip));
+				}
+			str = item->postfix();
+			if(str.empty() == false) {
+				report.push_back(reports::element(str,"",report.end()->tooltip));
+			}
+
+			// Loop through and display each report element
+			size_t tallest = 0;
+			for(reports::report::iterator i = report.begin(); i != report.end(); ++i) {
+				if(i->text.empty() == false) {
+					// Draw a text element
+					area = font::draw_text(this,rect,item->font_size(),font::NORMAL_COLOUR,i->text,x,y);
+					if(area.h > tallest) tallest = area.h;
+					if(i->text[i->text.size() - 1] == '\n') {
+						x = rect.x;
+						y += tallest;
+						tallest = 0;
+					} else {
+						x += area.w;
+					}
+				} else if(i->image.empty() == false) {
+					// Draw an image element
+					scoped_sdl_surface img(image::get_image(i->image,image::UNSCALED));
+
+					if(img == NULL) {
+						std::cerr << "could not find image for report: '" << i->image << "'\n";
+						continue;
+					}
+
+					area.x = x;
+					area.y = y;
+					area.w = minimum<int>(rect.w + rect.x - x, img->w);
+					area.h = minimum<int>(rect.h + rect.y - y, img->h);
+					draw_image_for_report(img,surf,area);
+
+					if(area.h > tallest) tallest = area.h;
+					x += area.w;
+				} else {
+					// No text or image, skip this element
+					continue;
+				}
+				if(i->tooltip.empty() == false) {
+					tooltips::add_tooltip(area,i->tooltip);
+				}
+			}
+		}
+	} else {
+		reportSurfaces_[report_num].assign(NULL);
+	}
 }
 
 void display::draw_unit_details(int x, int y, const gamemap::location& loc,
-         const unit& u, SDL_Rect& description_rect, SDL_Rect& profile_rect)
+         const unit& u, SDL_Rect& description_rect, int profilex, int profiley,
+         SDL_Rect* clip_rect)
 {
-	SDL_Rect clipRect;
-	clipRect.x = this->mapx();
-	clipRect.y = 0;
-	clipRect.w = this->x();
-	clipRect.h = this->y();
-	SDL_Surface* const background = getImage("misc/rightside.png",UNSCALED);
+	if(teams_.empty())
+		return;
 
-	if(background == NULL)
+	tooltips::clear_tooltips(description_rect);
+
+	SDL_Rect clipRect = clip_rect != NULL ? *clip_rect : screen_area();
+
+	const scoped_sdl_surface background(image::get_image(game_config::rightside_image,image::UNSCALED));
+	const scoped_sdl_surface background_bot(image::get_image(game_config::rightside_image_bot,image::UNSCALED));
+
+	if(background == NULL || background_bot == NULL)
 		return;
 
 	SDL_Surface* const screen = screen_.getSurface();
 
 	if(description_rect.w > 0 && description_rect.x >= mapx()) {
 		SDL_Rect srcrect = description_rect;
+		srcrect.y -= background->h;
 		srcrect.x -= mapx();
-		SDL_BlitSurface(background,&srcrect,screen,&description_rect);
-	}
 
-	if(profile_rect.w > 0 && profile_rect.x >= mapx() && background != NULL) {
-		SDL_Rect srcrect = profile_rect;
-		srcrect.x -= this->mapx();
-		SDL_BlitSurface(background,&srcrect,screen,&profile_rect);
+		SDL_BlitSurface(background_bot,&srcrect,screen,&description_rect);
+		update_rect(description_rect);
 	}
 
 	std::string status = string_table["healthy"];
 	if(map_.on_board(loc) &&
-	   u.invisible(map_.underlying_terrain(map_[loc.x][loc.y]))) {
-		status = "@" + string_table["invisible"];
+	   u.invisible(map_.underlying_terrain(map_[loc.x][loc.y]), 
+			status_.get_time_of_day().lawful_bonus,loc,
+			units_,teams_)) {
+		status = font::GOOD_TEXT + string_table["invisible"];
 	}
 
 	if(u.has_flag("slowed")) {
-		status = "#" + string_table["slowed"];
+		status = font::BAD_TEXT + string_table["slowed"];
 	}
 
 	if(u.has_flag("poisoned")) {
-		status = "#" + string_table["poisoned"];
+		status = font::BAD_TEXT + string_table["poisoned"];
 	}
 
-	const std::string& lang_ability =
-	             string_table["ability_" + u.type().ability()];
-
 	std::stringstream details;
-	details << "+" << u.description() << "\n"
-	        << "+" << u.type().language_name()
-			<< "\n-(" << string_table["level"] << ""
+	details << font::LARGE_TEXT << u.description() << "\n"
+	        << font::LARGE_TEXT << u.type().language_name()
+			<< "\n" << font::SMALL_TEXT << "(" << string_table["level"] << " "
 			<< u.type().level() << ")\n"
 			<< status << "\n"
-			<< unit_type::alignment_description(u.type().alignment())
+			<< translate_string(unit_type::alignment_description(u.type().alignment()))
 			<< "\n"
-			<< u.traits_description() << "\n"
-			<< (lang_ability.empty() ? u.type().ability() : lang_ability)<<"\n"
-			<< string_table["hp"] << ": " << u.hitpoints()
-			<< "/" << u.max_hitpoints() << "\n"
-			<< string_table["xp"] << ": " << u.experience() << "/"
-			<< u.max_experience() << "\n"
+			<< u.traits_description() << "\n";
+
+	const std::vector<std::string>& abilities = u.type().abilities();
+	for(std::vector<std::string>::const_iterator a = abilities.begin(); a != abilities.end(); ++a) {
+		details << translate_string_default("ability_" + *a, *a) << "\n";
+	}
+
+	//display in green/white/red depending on hitpoints
+	if(u.hitpoints() <= u.max_hitpoints()/3)
+		details << font::BAD_TEXT;
+	else if(u.hitpoints() > 2*(u.max_hitpoints()/3))
+		details << font::GOOD_TEXT;
+
+	details << string_table["hp"] << ": " << u.hitpoints()
+			<< "/" << u.max_hitpoints() << "\n";
+	
+	if(u.can_advance() == false) {
+		details << string_table["xp"] << ": " << u.experience() << "/-";
+	} else {
+		//if killing a unit the same level as us would level us up,
+		//then display in green
+		if(u.max_experience() - u.experience() < game_config::kill_experience) {
+			details << font::GOOD_TEXT;
+		}
+
+		details << string_table["xp"] << ": " << u.experience() << "/" << u.max_experience();
+	}
+	
+	details << "\n"
 			<< string_table["moves"] << ": " << u.movement_left() << "/"
 			<< u.total_movement()
 			<< "\n";
@@ -616,12 +862,9 @@ void display::draw_unit_details(int x, int y, const gamemap::location& loc,
 	for(std::vector<attack_type>::const_iterator at_it = attacks.begin();
 	    at_it != attacks.end(); ++at_it) {
 
-		const std::string& lang_weapon
-		         = string_table["weapon_name_" + at_it->name()];
-		const std::string& lang_type
-		         = string_table["weapon_type_" + at_it->type()];
-		const std::string& lang_special
-		         = string_table["weapon_special_" + at_it->special()];
+		const std::string& lang_weapon = string_table["weapon_name_" + at_it->name()];
+		const std::string& lang_type = string_table["weapon_type_" + at_it->type()];
+		const std::string& lang_special = string_table["weapon_special_" + at_it->special()];
 		details << "\n"
 				<< (lang_weapon.empty() ? at_it->name():lang_weapon) << " ("
 				<< (lang_type.empty() ? at_it->type():lang_type) << ")\n"
@@ -629,145 +872,94 @@ void display::draw_unit_details(int x, int y, const gamemap::location& loc,
 				<< at_it->damage() << "-" << at_it->num_attacks() << " -- "
 		        << (at_it->range() == attack_type::SHORT_RANGE ?
 		            string_table["short_range"] :
-					string_table["long_range"]) << "\n\n";
-			}
+					string_table["long_range"]);
+	
+		if(at_it->hexes() > 1) {
+			details << " (" << at_it->hexes() << ")";
+		}
+					
+		details << "\n\n";
+	}
 
-	description_rect =
-	    font::draw_text(this,clipRect,14,font::NORMAL_COLOUR,
-	                    details.str(),x,y);
+	//choose the font size based on how much room we have to play
+	//with on the right-side panel
+	const size_t font_size = this->y() >= 700 ? 13 : 10;
+
+	description_rect = font::draw_text(this,clipRect,font_size,font::NORMAL_COLOUR,
+	                                   details.str(),x,y);
+
+	update_rect(description_rect);
 
 	y += description_rect.h;
 
-	SDL_Surface* const profile = getImage(u.type().image_profile(),UNSCALED);
+	const scoped_sdl_surface profile(image::get_image(u.type().image(),image::UNSCALED));
 
 	if(profile == NULL)
 		return;
 
-	blit_surface(x,y,profile);
+	//blit the unit profile
+	{
+		const size_t profilew = 50;
+		const size_t profileh = 50;
+		SDL_Rect srcrect = { (profile->w-profilew)/2,(profile->h-profileh)/2,
+		                     profilew,profileh };
+		SDL_Rect dstrect = srcrect;
+		dstrect.x = profilex;
+		dstrect.y = profiley;
+		SDL_BlitSurface(profile,&srcrect,video().getSurface(),&dstrect);
 
-	profile_rect.x = x;
-	profile_rect.y = y;
-	profile_rect.w = profile->w;
-	profile_rect.h = profile->h;
-}
-
-SDL_Rect display::get_minimap_location(int x, int y, int w, int h)
-{
-	SDL_Rect res = {0,0,0,0};
-	SDL_Surface* const surface = getMinimap(w,h);
-	if(surface == NULL)
-		return res;
-
-	if(w > surface->w) {
-		x += (w - surface->w)/2;
-		w = surface->w;
+		update_rect(profilex,profiley,profilew,profileh);
 	}
-
-	if(h > surface->h) {
-		y += (h - surface->h)/2;
-		h = surface->h;
-	}
-
-	if(w < surface->w || h < surface->h)
-		return res;
-
-	res.x = x;
-	res.y = y;
-	res.w = w;
-	res.h = h;
-	return res;
 }
 
 void display::draw_minimap(int x, int y, int w, int h)
 {
-	SDL_Surface* const surface = getMinimap(w,h);
+	const scoped_sdl_surface surface(get_minimap(w,h));
 	if(surface == NULL)
 		return;
 
-	SDL_Rect minimap_location = get_minimap_location(x,y,w,h);
-	x = minimap_location.x;
-	y = minimap_location.y;
-	w = minimap_location.w;
-	h = minimap_location.h;
+	SDL_Rect minimap_location = {x,y,w,h};
 
-	//we only have to draw the map surroundings once per level
-	if(!minimapDecorationsDrawn_) {
-		minimapDecorationsDrawn_ = true;
+	clip_rect_setter clip_setter(video().getSurface(),minimap_location);
 
-		//draw red borders around the map
-		const short border_colour = short(0xF000);
-		gui::draw_rectangle(x-1,y-1,w+2,h+2,border_colour,screen_.getSurface());
-		gui::draw_rectangle(x-3,y-3,w+6,h+6,border_colour,screen_.getSurface());
-		SDL_Surface* const north = getImage("misc/compass-north.png",UNSCALED);
-		SDL_Surface* const south = getImage("misc/compass-south.png",UNSCALED);
+	SDL_Rect loc = minimap_location;
+	SDL_BlitSurface(surface,NULL,video().getSurface(),&loc);
 
-		if(north != NULL && north->h < y) {
-			const int xloc = x + w/2 - north->w/2;
-			const int yloc = y - north->h;
+	for(unit_map::const_iterator u = units_.begin(); u != units_.end(); ++u) {
+		if(fogged(u->first.x,u->first.y) || 
+				(teams_[currentTeam_].is_enemy(u->second.side()) &&
+				u->second.invisible(map_.underlying_terrain(map_[u->first.x][u->first.y]), 
+				status_.get_time_of_day().lawful_bonus,u->first,
+				units_,teams_)))
+			continue;
 
-			blit_surface(xloc, yloc, north);
-
-			if(south != NULL) {
-				blit_surface(xloc, y+h, south);
-			}
-
-			//try to draw the little widgets on each corner of the map
-			SDL_Surface* const tl=getImage("misc/topleft-corner.png",UNSCALED);
-			SDL_Surface* const bl=getImage("misc/botleft-corner.png",UNSCALED);
-			SDL_Surface* const tr=getImage("misc/topright-corner.png",UNSCALED);
-			SDL_Surface* const br=getImage("misc/botright-corner.png",UNSCALED);
-
-			if(tl != NULL && bl != NULL && tr != NULL && br != NULL) {
-				const int adjust = 5;
-				int xloc = x - tl->w + adjust;
-				int yloc = y - tl->h + adjust;
-
-				blit_surface(xloc,yloc,tl);
-
-				yloc = y + h - adjust;
-				blit_surface(xloc,yloc,bl);
-
-				xloc = x + w - adjust;
-				blit_surface(xloc,yloc,br);
-
-				yloc = y - tl->h + adjust;
-				blit_surface(xloc,yloc,tr);
-			}
-		}
+		const int side = u->second.side();
+		const SDL_Color& col = team::get_side_colour(side);
+		const Uint32 mapped_col = SDL_MapRGB(video().getSurface()->format,col.r,col.g,col.b);
+		SDL_Rect rect = {x + (u->first.x*w)/map_.x(),
+		                 y + (u->first.y*h)/map_.y(),
+						 w/map_.x(), h/map_.y() };
+		SDL_FillRect(video().getSurface(),&rect,mapped_col);
 	}
 
-	SDL_BlitSurface(surface,NULL,screen_.getSurface(),&minimap_location);
+	const double xscaling = double(surface->w)/double(map_.x());
+	const double yscaling = double(surface->h)/double(map_.y());
 
-	const double scaling = static_cast<double>(surface->w/map_.x());
+	const int xbox = static_cast<int>(xscaling*xpos_/(zoom_*0.75));
+	const int ybox = static_cast<int>(yscaling*ypos_/zoom_);
 
-	const int xbox = static_cast<int>(scaling*xpos_/(zoom_*0.75));
-	const int ybox = static_cast<int>(scaling*ypos_/zoom_);
+	const int wbox = static_cast<int>(xscaling*map_area().w/(zoom_*0.75) - xscaling);
+	const int hbox = static_cast<int>(yscaling*map_area().h/zoom_ - yscaling);
 
-	const int wbox = static_cast<int>(scaling*mapx()/(zoom_*0.75) - scaling);
-	const int hbox = static_cast<int>(scaling*this->y()/zoom_ - scaling);
-
-	const Pixel boxcolour = Pixel(SDL_MapRGB(surface->format,0xFF,0xFF,0xFF));
+	const Uint32 boxcolour = SDL_MapRGB(surface->format,0xFF,0xFF,0xFF);
 	SDL_Surface* const screen = screen_.getSurface();
 
-	surface_lock lock(screen);
-	short* const data = lock.pixels();
-	short* const start_top = data + (y+ybox)*screen->w + (x+xbox);
-	short* const end_top = start_top + wbox;
+	gui::draw_rectangle(x+xbox,y+ybox,wbox,hbox,boxcolour,screen);
 
-	std::fill(start_top,end_top,boxcolour);
-
-	short* const start_bot = start_top + hbox*screen->w;
-	short* const end_bot = start_bot + wbox;
-
-	std::fill(start_bot,end_bot+1,boxcolour);
-
-	short* side;
-	for(side = start_top; side != start_bot; side += screen->w) {
-		*side = boxcolour;
-		side[wbox] = boxcolour;
-	}
+	update_rect(minimap_location);
 }
 
+#if 0
 void display::draw_terrain_palette(int x, int y, gamemap::TERRAIN selected)
 {
 	const int max_h = 35;
@@ -782,9 +974,14 @@ void display::draw_terrain_palette(int x, int y, gamemap::TERRAIN selected)
 	std::vector<gamemap::TERRAIN> terrains = map_.get_terrain_precedence();
 	for(std::vector<gamemap::TERRAIN>::const_iterator i = terrains.begin();
 	    i != terrains.end(); ++i) {
-		SDL_Surface* const image = getTerrain(*i,SCALED,-1,-1);
+		const scoped_sdl_surface image(get_terrain(*i,image::SCALED,-1,-1));
+		if(image == NULL) {
+			std::cerr << "image for terrain '" << *i << "' not found\n";
+			return;
+		}
+
 		if(x + image->w >= this->x() || y + image->h >= this->y()) {
-			std::cout << "terrain palette can't fit: " << x + image->w << " > " << this->x() << " or " << y+image->h << " > " << this->y() << "\n";
+			std::cerr << "terrain palette can't fit: " << x + image->w << " > " << this->x() << " or " << y+image->h << " > " << this->y() << "\n";
 			return;
 		}
 
@@ -808,7 +1005,9 @@ void display::draw_terrain_palette(int x, int y, gamemap::TERRAIN selected)
 	}
 
 	invalid_rect.h = y - invalid_rect.y;
+	update_rect(invalid_rect);
 }
+#endif
 
 gamemap::TERRAIN display::get_terrain_on(int palx, int paly, int x, int y)
 {
@@ -827,423 +1026,634 @@ gamemap::TERRAIN display::get_terrain_on(int palx, int paly, int x, int y)
 	return terrains[index];
 }
 
-void display::draw_tile(int x, int y, SDL_Surface* unit_image,
-                        double highlight_ratio, Pixel blend_with)
+void display::draw_halo_on_tile(int x, int y)
+{
+	const gamemap::location loc(x,y);
+	int xpos = get_location_x(loc);
+	int ypos = get_location_y(loc);
 
+	const halo_map::iterator halo_it = haloes_.find(loc);
+
+	//see if there is a unit on this tile
+	const unit_map::const_iterator it = fogged(x,y) ? units_.end() : units_.find(gamemap::location(x,y));
+
+	if(halo_it != haloes_.end() && it == units_.end()) {
+		halo::remove(halo_it->second);
+		haloes_.erase(halo_it);
+	} else if(halo_it == haloes_.end() && it != units_.end()) {
+		const std::string& halo = it->second.type().image_halo();
+		if(halo.empty() == false) {
+			haloes_.insert(std::pair<gamemap::location,int>(loc,halo::add(xpos+hex_width()/2,ypos+hex_size()/2,halo)));
+		}
+	}
+}
+
+void display::draw_unit_on_tile(int x, int y, SDL_Surface* unit_image_override,
+								double highlight_ratio, Uint32 blend_with)
 {
 	if(updatesLocked_)
 		return;
 
 	const gamemap::location loc(x,y);
-	int xpos = int(get_location_x(loc));
-	int ypos = int(get_location_y(loc));
+	int xpos = get_location_x(loc);
+	int ypos = get_location_y(loc);
 
-	if(xpos > mapx() || ypos > this->y())
+	//see if there is a unit on this tile
+	const unit_map::const_iterator it = units_.find(loc);
+
+	if(it == units_.end()) {
 		return;
-
-	int xend = xpos + static_cast<int>(zoom_);
-	int yend = int(get_location_y(gamemap::location(x,y+1)));
-
-	if(xend < 0 || yend < 0)
-		return;
-
-	const gamemap::location ne_loc(loc.get_direction(
-	                                  gamemap::location::NORTH_EAST));
-	const gamemap::location se_loc(loc.get_direction(
-	                                  gamemap::location::SOUTH_EAST));
-
-	//assert(tiles_adjacent(loc,ne_loc));
-	//assert(tiles_adjacent(loc,se_loc));
-
-	const int ne_xpos = (int)get_location_x(ne_loc);
-	const int ne_ypos = (int)get_location_y(ne_loc);
-	const int se_xpos = (int)get_location_x(se_loc);
-	const int se_ypos = (int)get_location_y(se_loc);
-
-	gamemap::TERRAIN terrain = gamemap::VOID_TERRAIN;
-
-	if(x >= 0 && y >= 0 && x < map_.x() && y < map_.y())
-		terrain = map_[x][y];
-
-	IMAGE_TYPE image_type = SCALED;
-
-	//find if this tile should be greyed
-	if(pathsList_ != NULL && pathsList_->routes.find(gamemap::location(x,y)) ==
-					         pathsList_->routes.end()) {
-		image_type = GREYED;
 	}
+	
+	SDL_Rect clip_rect = map_area();
 
-	if(loc == mouseoverHex_ || loc == selectedHex_ &&
-	   units_.count(gamemap::location(x,y)) == 1 ||
-	   std::find(route_.steps.begin(),route_.steps.end(),loc) !=
-		         route_.steps.end()) {
-		image_type = BRIGHTENED;
-	}
-
-	SDL_Surface* surface = getTerrain(terrain,image_type,x,y);
-
-	if(surface == NULL) {
-		std::cerr << "Could not get terrain surface\n";
+	if(xpos > clip_rect.x + clip_rect.w || ypos > clip_rect.y + clip_rect.h ||
+	   xpos + zoom_ < clip_rect.x || ypos + zoom_ < clip_rect.y) {
 		return;
 	}
 
-	std::vector<SDL_Surface*> overlaps = getAdjacentTerrain(x,y,image_type);
-	typedef std::multimap<gamemap::location,std::string>::const_iterator Itor;
-	for(std::pair<Itor,Itor> overlays =
-	    overlays_.equal_range(gamemap::location(x,y));
-		overlays.first != overlays.second; ++overlays.first) {
-		SDL_Surface* const overlay_surface = getImage(overlays.first->second);
-		if(overlay_surface != NULL) {
-			overlaps.push_back(overlay_surface);
-		}
-	}
+	SDL_Surface* const dst = screen_.getSurface();
 
-	int ysrc = 0, xsrc = 0;
-	if(ypos < 0) {
-		ysrc -= ypos;
-		ypos = 0;
-	}
-
-	if(xpos < 0) {
-		xsrc -= xpos;
-		xpos = 0;
-	}
-
-	if(xend >= mapx())
-		xend = mapx()-1;
-
-	if(yend >= this->y())
-		yend = this->y()-1;
-
-	if(xend < xpos || yend < ypos)
-		return;
-
-	SDL_Surface* energy_image = NULL;
+	clip_rect_setter set_clip_rect(dst,clip_rect);
 
 	double unit_energy = 0.0;
 
-	const short energy_loss_colour = 0;
-	short energy_colour = 0;
+	SDL_Color energy_colour = {0,0,0,0};
 
-	const int max_energy = 80;
-	double energy_size = 1.0;
-	bool face_left = true;
+	if(unit_image_override != NULL)
+		sdl_add_ref(unit_image_override);
 
-	//see if there is a unit on this tile
-	const unit_map::const_iterator it = units_.find(gamemap::location(x,y));
-	if(it != units_.end()) {
-		if(unit_image == NULL)
-			unit_image = getImage(it->second.image());
+	scoped_sdl_surface unit_image(unit_image_override);
+
+	const std::string* energy_file = NULL;
+
+	const unit& u = it->second;
+
+	if(loc != hiddenUnit_ || !hideEnergy_) {
+		if(unit_image == NULL) {
+			unit_image.assign(image::get_image(it->second.image(),it->second.stone() ? image::GREYED : image::SCALED));
+		}
+
+		if(unit_image == NULL) {
+			return;
+		}
+
 		const int unit_move = it->second.movement_left();
 		const int unit_total_move = it->second.total_movement();
 
-		const char* energy_file = NULL;
-
-		if(it->second.side() != currentTeam_+1) {
-			if(teams_[currentTeam_].is_enemy(it->second.side())) {
-				energy_file = "enemy-energy.png";
+		if(size_t(u.side()) != currentTeam_+1) {
+			if(team_valid() &&
+			   teams_[currentTeam_].is_enemy(it->second.side())) {
+				energy_file = &game_config::enemy_energy_image;
 			} else {
-				energy_file = "ally-energy.png";
+				energy_file = &game_config::ally_energy_image;
 			}
 		} else {
-			if(unit_move == unit_total_move) {
-				energy_file = "unmoved-energy.png";
-			} else if(unit_move > 0) {
-				energy_file = "partmoved-energy.png";
+			if(activeTeam_ == currentTeam_ && unit_move == unit_total_move && !it->second.user_end_turn()) {
+				energy_file = &game_config::unmoved_energy_image;
+			} else if(activeTeam_ == currentTeam_ && unit_can_move(loc,units_,map_,teams_) && !it->second.user_end_turn()) {
+				energy_file = &game_config::partmoved_energy_image;
 			} else {
-				energy_file = "moved-energy.png";
+				energy_file = &game_config::moved_energy_image;
 			}
 		}
 
-		energy_image = getImage(energy_file);
-		unit_energy = double(it->second.hitpoints()) /
-		              double(it->second.max_hitpoints());
+		assert(energy_file != NULL);
+		if(energy_file == NULL) {
+			std::cerr << "energy file is NULL\n";
+			return;
+		}
 
 		if(highlight_ratio == 1.0)
 			highlight_ratio = it->second.alpha();
 
-		if(it->second.invisible(map_.underlying_terrain(map_[x][y])) &&
+		if(u.invisible(map_.underlying_terrain(map_[x][y]), 
+					status_.get_time_of_day().lawful_bonus,loc,
+					units_,teams_) &&
 		   highlight_ratio > 0.5) {
 			highlight_ratio = 0.5;
 		}
 
 		if(loc == selectedHex_ && highlight_ratio == 1.0) {
 			highlight_ratio = 1.5;
-			blend_with = short(0xFFFF);
+			blend_with = rgb(255,255,255);
 		}
 
-		{
-			int er = 0;
-			int eg = 0;
-			int eb = 0;
-			if(unit_energy < 0.33) {
-				er = 200;
-			} else if(unit_energy < 0.66) {
-				er = 200;
-				eg = 200;
+		if(u.max_hitpoints() > 0) {
+			unit_energy = double(u.hitpoints())/double(u.max_hitpoints());
+		}
+
+		if(unit_energy < 0.33) {
+			energy_colour.r = 200;
+			energy_colour.g = 0;
+			energy_colour.b = 0;
+		} else if(unit_energy < 0.66) {
+			energy_colour.r = 200;
+			energy_colour.g = 200;
+			energy_colour.b = 0;
+		} else {
+			energy_colour.r = 0;
+			energy_colour.g = 200;
+			energy_colour.b = 0;
+		}
+
+		if(u.facing_left() == false) {
+			//reverse the image here. image::reverse_image is more efficient, however
+			//it can be used only if we are sure that unit_image came from image::get_image.
+			//Since we aren't sure of that in the case of overrides, use the less efficient
+			//flip_surface if the image has been over-ridden.
+			if(unit_image_override == NULL) {
+				unit_image.assign(image::reverse_image(unit_image));
 			} else {
-				eg = 200;
+				unit_image.assign(flip_surface(unit_image));
 			}
-
-			energy_colour = ::SDL_MapRGB(energy_image->format,er,eg,eb);
 		}
-
-		if(it->second.max_hitpoints() < max_energy) {
-			energy_size = double(it->second.max_hitpoints())/double(max_energy);
-		}
-
-		face_left = it->second.facing_left();
 	}
-
-	const std::pair<int,int>& energy_bar_loc = calculate_energy_bar();
-	double total_energy = double(energy_bar_loc.second - energy_bar_loc.first);
-
-	const int skip_energy_rows = int(total_energy*(1.0-energy_size));
-	total_energy -= double(skip_energy_rows);
-
-	const int show_energy_after = energy_bar_loc.first +
-	                              int((1.0-unit_energy)*total_energy);
-
-	const bool draw_hit = hitUnit_ == gamemap::location(x,y);
-	const short hit_colour = short(0xF000);
 
 	if(deadUnit_ == gamemap::location(x,y)) {
 		highlight_ratio = deadAmount_;
 	}
 
-	const int xpad = is_odd(surface->w);
+	if(unit_image == NULL || fogged(x,y) ||
+			(teams_[currentTeam_].is_enemy(it->second.side()) && 
+			it->second.invisible(map_.underlying_terrain(map_[x][y]), 
+					status_.get_time_of_day().lawful_bonus,loc,
+					units_,teams_))) {
+		return;
+	}
+
+	const gamemap::TERRAIN terrain = map_.get_terrain(loc);
+	const int height_adjust = it->second.is_flying() ? 0 : int(map_.get_terrain_info(terrain).unit_height_adjust()*zoom());
+	const double submerge = it->second.is_flying() ? 0.0 : map_.get_terrain_info(terrain).unit_submerge();
+
+	if(loc == advancingUnit_ && it != units_.end()) {
+		//the unit is advancing - set the advancing colour to white if it's a
+		//non-chaotic unit, otherwise black
+		blend_with = it->second.type().alignment() == unit_type::CHAOTIC ?
+		                                        rgb(16,16,16) : rgb(255,255,255);
+		highlight_ratio = advancingAmount_;
+	} else if(it->second.poisoned() && highlight_ratio == 1.0) {
+		//the unit is poisoned - draw with a green hue
+		blend_with = rgb(0,255,0);
+		highlight_ratio = 0.75;
+	}
+
+	if(loc != hiddenUnit_) {
+		scoped_sdl_surface ellipse_front(NULL);
+		scoped_sdl_surface ellipse_back(NULL);
+
+		if(preferences::show_side_colours()) {
+			char buf[50];
+			sprintf(buf,"misc/ellipse-%d-top.png",team::get_side_colour_index(it->second.side()));
+			ellipse_back.assign(image::get_image(buf));
+			sprintf(buf,"misc/ellipse-%d-bottom.png",team::get_side_colour_index(it->second.side()));
+			ellipse_front.assign(image::get_image(buf));
+		}
+
+		draw_unit(xpos,ypos - height_adjust,unit_image,false,
+		          highlight_ratio,blend_with,submerge,ellipse_back,ellipse_front);
+	}
+
+	const double bar_alpha = highlight_ratio < 1.0 && blend_with == 0 ? highlight_ratio : 1.0;
+	if(energy_file != NULL) {
+		draw_bar(*energy_file,xpos,ypos,(u.max_hitpoints()*2)/3,unit_energy,energy_colour,bar_alpha);
+	}
+
+	if(u.experience() > 0 && u.can_advance()) {
+		const double filled = double(u.experience())/double(u.max_experience());
+		const int level = maximum<int>(u.type().level(),1);
+		const SDL_Color normal_colour = {02,153,255,0}, near_advance_colour = {255,255,255,0};
+		const bool near_advance = u.max_experience() - u.experience() <= game_config::kill_experience*level;
+		const SDL_Color colour = near_advance ? near_advance_colour : normal_colour;
+
+		draw_bar("enemy-energy.png",xpos+5,ypos,u.max_experience()/(level*2),filled,colour,bar_alpha);
+	}
+
+	const std::vector<std::string>& overlays = it->second.overlays();
+	for(std::vector<std::string>::const_iterator ov = overlays.begin(); ov != overlays.end(); ++ov) {
+		const scoped_sdl_surface img(image::get_image(*ov));
+		if(img.get() != NULL) {
+			draw_unit(xpos,ypos,img);
+		}
+	}
+}
+
+void display::draw_bar(const std::string& image, int xpos, int ypos, size_t height, double filled, const SDL_Color& col, double alpha)
+{
+	filled = minimum<double>(maximum<double>(filled,0.0),1.0);
+
+	scoped_sdl_surface surf(image::get_image(image,image::SCALED,image::NO_ADJUST_COLOUR));
+	scoped_sdl_surface unmoved_surf(image::get_image("unmoved-energy.png",image::SCALED,image::NO_ADJUST_COLOUR));
+	if(surf == NULL || unmoved_surf == NULL) {
+		return;
+	}
+
+	const SDL_Rect& bar_loc = calculate_energy_bar(unmoved_surf);
+	if(height > bar_loc.h) {
+		height = bar_loc.h;
+	}
+
+	if(alpha != 1.0) {
+		surf.assign(adjust_surface_alpha(surf,alpha));
+		if(surf == NULL) {
+			return;
+		}
+	}
+
+	const size_t skip_rows = bar_loc.h - height;
+
+	SDL_Rect top = {0,0,surf->w,bar_loc.y};
+	SDL_Rect bot = {0,bar_loc.y+skip_rows,surf->w,0};
+	bot.h = surf->w - bot.y;
+
+	blit_surface(xpos,ypos,surf,&top);
+	blit_surface(xpos,ypos+top.h,surf,&bot);
+
+	const size_t unfilled = (const size_t)(height*(1.0 - filled));
+
+	if(unfilled < height && alpha >= 0.3) {
+		SDL_Rect filled_area = {xpos+bar_loc.x,ypos+bar_loc.y+unfilled,bar_loc.w,height-unfilled};
+		const Uint32 colour = SDL_MapRGB(video().getSurface()->format,col.r,col.g,col.b);
+		SDL_FillRect(video().getSurface(),&filled_area,colour);
+	}
+}
+
+#if 0
+void display::draw_tile_adjacent(int x, int y, image::TYPE image_type, ADJACENT_TERRAIN_TYPE type)
+{
+	const gamemap::location loc(x,y);
+	int xpos = int(get_location_x(loc));
+	int ypos = int(get_location_y(loc));
+
+	SDL_Rect clip_rect = map_area();
+
+	if(xpos > clip_rect.x + clip_rect.w || ypos > clip_rect.y + clip_rect.h ||
+	   xpos + zoom_ < clip_rect.x || ypos + zoom_ < clip_rect.y) {
+		return;
+	}
 
 	SDL_Surface* const dst = screen_.getSurface();
 
-	const Pixel grid_colour = SDL_MapRGB(dst->format,0,0,0);
+	clip_rect_setter set_clip_rect(dst,clip_rect);
+	
+	const std::vector<shared_sdl_surface>& adj = getAdjacentTerrain(x,y,image_type,type);
 
-	int j;
-	for(j = ypos; j != yend; ++j) {
-		const int yloc = ysrc+j-ypos;
-		const int xoffset = abs(yloc - static_cast<int>(zoom_/2.0))/2;
+	std::vector<shared_sdl_surface>::const_iterator i;
+	for(i = adj.begin(); i != adj.end(); ++i) {
+		SDL_Rect dstrect = { xpos, ypos, 0, 0 };
+		SDL_BlitSurface(*i,NULL,dst,&dstrect);
+	}
 
-		const int ne_yloc = ysrc+j-ne_ypos;
-		const int ne_xoffset = abs(ne_yloc - static_cast<int>(zoom_/2.0))/2;
+	const std::vector<shared_sdl_surface>& built = getBuiltTerrain(x,y,image_type,type);
 
-		const int se_yloc = ysrc+j-se_ypos;
-		const int se_xoffset = abs(se_yloc - static_cast<int>(zoom_/2.0))/2;
+	for(i = built.begin(); i != built.end(); ++i) {
+		SDL_Rect dstrect = { xpos, ypos, 0, 0 };
+		SDL_BlitSurface(*i,NULL,dst,&dstrect);
+	}
+}
+#endif
 
-		int xdst = xpos;
-		if(xoffset > xsrc) {
-			xdst += xoffset - xsrc;
-			if(xend < xdst)
-				continue;
+void display::draw_terrain_on_tile(int x, int y, image::TYPE image_type, ADJACENT_TERRAIN_TYPE type)
+{
+
+	const gamemap::location loc(x,y);
+	int xpos = int(get_location_x(loc));
+	int ypos = int(get_location_y(loc));
+
+	SDL_Rect clip_rect = map_area();
+
+	if(xpos > clip_rect.x + clip_rect.w || ypos > clip_rect.y + clip_rect.h ||
+	   xpos + zoom_ < clip_rect.x || ypos + zoom_ < clip_rect.y) {
+		return;
+	}
+
+	SDL_Surface* const dst = screen_.getSurface();
+
+	clip_rect_setter set_clip_rect(dst,clip_rect);
+
+	const std::vector<shared_sdl_surface>& images = get_terrain_images(x,y,image_type,type);
+
+	std::vector<shared_sdl_surface>::const_iterator itor;
+	for(itor = images.begin(); itor != images.end(); ++itor) {
+		SDL_Rect dstrect = { xpos, ypos, 0, 0 };
+		SDL_BlitSurface(*itor,NULL,dst,&dstrect);
+	}
+}
+
+void display::draw_tile(int x, int y, SDL_Surface* unit_image, double alpha, Uint32 blend_to)
+{
+	if(updatesLocked_)
+		return;
+
+	draw_halo_on_tile(x,y);
+	
+	const gamemap::location loc(x,y);
+	int xpos = int(get_location_x(loc));
+	int ypos = int(get_location_y(loc));
+
+	SDL_Rect clip_rect = map_area();
+
+	if(xpos >= clip_rect.x + clip_rect.w || ypos >= clip_rect.y + clip_rect.h ||
+	   xpos + zoom_ < clip_rect.x || ypos + zoom_ < clip_rect.y) {
+		return;
+	}
+
+	SDL_Surface* const dst = screen_.getSurface();
+
+	clip_rect_setter set_clip_rect(dst,clip_rect);
+
+	const bool is_shrouded = shrouded(x,y);
+	gamemap::TERRAIN terrain = gamemap::VOID_TERRAIN;
+
+	if(!is_shrouded) {
+		terrain = map_.get_terrain(loc);
+	}
+
+	image::TYPE image_type = image::SCALED;
+
+	const time_of_day& tod = status_.get_time_of_day();
+	const time_of_day& tod_at = timeofday_at(status_,units_,loc);
+	std::string mask = tod_at.image_mask;
+	if(tod_hex_mask1 != NULL || tod_hex_mask2 != NULL || tod.image_mask != tod_at.image_mask) {
+		image_type = image::UNMASKED;
+		mask = tod_at.image_mask;
+	}
+
+	//find if this tile should be greyed
+	if(pathsList_ != NULL && pathsList_->routes.find(gamemap::location(x,y)) ==
+					         pathsList_->routes.end()) {
+		image_type = image::GREYED;
+	}
+
+	unit_map::iterator un = find_visible_unit(units_, loc, map_,
+		status_.get_time_of_day().lawful_bonus,teams_,teams_[currentTeam_]);
+
+	if(loc == mouseoverHex_ && map_.on_board(mouseoverHex_) ||
+	   loc == selectedHex_ && (un != units_.end())) {
+		image_type = image::BRIGHTENED;
+	}
+	else if (highlighted_locations_.find(loc) != highlighted_locations_.end()) {
+		image_type = image::SEMI_BRIGHTENED;
+	}
+
+#if 0
+	scoped_sdl_surface surface(get_terrain(terrain,image_type,x,y));
+
+	if(surface == NULL) {
+		std::cerr << "Could not get terrain surface\n";
+		return;
+	}
+
+	update_rect(xpos,ypos,surface->w,surface->h);
+
+	//note that dstrect can be changed by SDL_BlitSurface and so a new instance should be
+	//initialized to pass to each call to SDL_BlitSurface
+	SDL_Rect dstrect = { xpos, ypos, 0, 0 };
+	SDL_BlitSurface(surface,NULL,dst,&dstrect);
+#endif
+
+	if(!is_shrouded) {
+		draw_terrain_on_tile(x,y,image_type,ADJACENT_BACKGROUND);
+
+		scoped_sdl_surface flag(get_flag(terrain,x,y));
+		if(flag != NULL) {
+			SDL_Rect dstrect = { xpos, ypos, 0, 0 };
+			SDL_BlitSurface(flag,NULL,dst,&dstrect);
 		}
 
-		const int maxlen = static_cast<int>(zoom_) - xoffset*2;
-		int len = ((xend - xdst) > maxlen) ? maxlen : xend - xdst;
+		typedef std::multimap<gamemap::location,std::string>::const_iterator Itor;
 
-		const int neoffset = ne_xpos+ne_xoffset;
-		const int seoffset = se_xpos+se_xoffset;
-		const int minoffset = minimum<int>(neoffset,seoffset);
+		for(std::pair<Itor,Itor> overlays = overlays_.equal_range(loc);
+			overlays.first != overlays.second; ++overlays.first) {
 
-		//FIXME: make it work with ne_ypos being <= 0
-		if(ne_ypos > 0 && xdst + len >= neoffset) {
-			len = neoffset - xdst;
-			if(len < 0)
-				len = 0;
-		} else if(ne_ypos > 0 && xdst + len >= seoffset) {
-			len = seoffset - xdst;
-			if(len < 0)
-				len = 0;
-		}
-
-		const int srcy = minimum<int>(yloc,surface->h-1);
-
-		surface_lock srclock(surface);
-		short* startsrc = srclock.pixels() + srcy*(surface->w+xpad) +
-		                  (xoffset > xsrc ? xoffset:xsrc);
-		short* endsrc = startsrc + len;
-
-		assert(startsrc >= srclock.pixels() &&
-		       endsrc <= srclock.pixels() + (surface->w+xpad)*surface->h);
-
-		surface_lock dstlock(dst);
-		short* startdst = dstlock.pixels() + j*dst->w + xdst;
-		std::copy(startsrc,endsrc,startdst);
-
-		int extra = 0;
-
-		//if the line didn't make it to the next hex, then fill in with the
-		//last pixel up to the next hex
-		if(ne_ypos > 0 && xdst + len < minoffset && len > 0) {
-			extra = minimum(minoffset-(xdst + len),mapx()-(xdst+len));
-			std::fill(startdst+len,startdst+len+extra,startsrc[len-1]);
-		}
-
-		//copy any overlapping tiles on
-		for(std::vector<SDL_Surface*>::const_iterator ov = overlaps.begin();
-		    ov != overlaps.end(); ++ov) {
-			const int srcy = minimum<int>(yloc,(*ov)->h-1);
-			const int w = (*ov)->w + is_odd((*ov)->w);
-
-			surface_lock overlap_lock(*ov);
-			short* beg = overlap_lock.pixels() +
-			             srcy*w + (xoffset > xsrc ? xoffset:xsrc);
-			short* end = beg + len;
-			short* dst = startdst;
-
-			while(beg != end) {
-				if(*beg != 0) {
-					*dst = *beg;
-				}
-
-				++dst;
-				++beg;
+			scoped_sdl_surface overlay_surface(image::get_image(overlays.first->second,image_type));
+			
+			//note that dstrect can be changed by SDL_BlitSurface and so a
+			//new instance should be initialized to pass to each call to
+			//SDL_BlitSurface
+			if(overlay_surface != NULL) {
+				SDL_Rect dstrect = { xpos, ypos, 0, 0 };
+				SDL_BlitSurface(overlay_surface,NULL,dst,&dstrect);
 			}
+		}
+		draw_footstep(loc,xpos,ypos);
+	} else {
+		//FIXME: shouldn't void.png and fog.png be in the program configuration?
+		scoped_sdl_surface surface(image::get_image("terrain/void.png"));
 
-			//fill in any extra pixels on the end
-			if(extra > 0 && len > 0 && beg[-1] != 0)
-				std::fill(dst,dst+extra,beg[-1]);
+		if(surface == NULL) {
+			std::cerr << "Could not get void surface!\n";
+			return;
 		}
 
-		if(grid_ && startsrc < endsrc) {
-			*startdst = grid_colour;
-			*(startdst+len-1) = grid_colour;
-			if(j == ypos || j == yend-1) {
-				std::fill(startdst,startdst+len,grid_colour);
-			}
+		SDL_Rect dstrect = { xpos, ypos, 0, 0 };
+		SDL_BlitSurface(surface,NULL,dst,&dstrect);
+	}
+
+	if(fogged(x,y)) {
+		const scoped_sdl_surface fog_surface(image::get_image("terrain/fog.png"));
+		if(fog_surface != NULL) {
+			SDL_Rect dstrect = { xpos, ypos, 0, 0 };
+			SDL_BlitSurface(fog_surface,NULL,dst,&dstrect);
+		}
+	}
+
+	draw_unit_on_tile(x,y,unit_image,alpha,blend_to);
+
+	if(!shrouded(x,y)) {
+		draw_terrain_on_tile(x,y,image_type,ADJACENT_FOREGROUND);
+	}
+
+	//draw the time-of-day mask on top of the hex
+	if(tod_hex_mask1 != NULL || tod_hex_mask2 != NULL) {
+		if(tod_hex_mask1 != NULL) {
+			SDL_Rect dstrect = { xpos, ypos, 0, 0 };
+			SDL_BlitSurface(tod_hex_mask1,NULL,dst,&dstrect);
+		}
+
+		if(tod_hex_mask2 != NULL) {
+			SDL_Rect dstrect = { xpos, ypos, 0, 0 };
+			SDL_BlitSurface(tod_hex_mask2,NULL,dst,&dstrect);
+		}
+	} else if(mask != "") {
+		const scoped_sdl_surface img(image::get_image(mask,image::UNMASKED,image::NO_ADJUST_COLOUR));
+		if(img != NULL) {
+			SDL_Rect dstrect = { xpos, ypos, 0, 0 };
+			SDL_BlitSurface(img,NULL,dst,&dstrect);
+		}
+	}
+
+	if(grid_) {
+		scoped_sdl_surface grid_surface(image::get_image("terrain/grid.png"));
+		if(grid_surface != NULL) {
+			SDL_Rect dstrect = { xpos, ypos, 0, 0 };
+			SDL_BlitSurface(grid_surface,NULL,dst,&dstrect);
 		}
 	}
 
 	if(game_config::debug && debugHighlights_.count(gamemap::location(x,y))) {
-		SDL_Surface* const cross = getImage("cross.png");
+		const scoped_sdl_surface cross(image::get_image(game_config::cross_image));
 		if(cross != NULL)
-			draw_unit(xpos-xsrc,ypos-ysrc,cross,face_left,false,
-			          debugHighlights_[gamemap::location(x,y)],0);
+			draw_unit(xpos,ypos,cross,false,debugHighlights_[loc],0);
 	}
 
-	if(unit_image == NULL || energy_image == NULL)
+	update_rect(xpos,ypos,zoom_,zoom_);
+}
+
+void display::draw_footstep(const gamemap::location& loc, int xloc, int yloc)
+{
+	std::vector<gamemap::location>::const_iterator i =
+	         std::find(route_.steps.begin(),route_.steps.end(),loc);
+
+	if(i == route_.steps.begin() || i == route_.steps.end())
 		return;
 
-	if(loc != hiddenUnit_) {
-		if(draw_hit) {
-			blend_with = hit_colour;
-			highlight_ratio = 0.7;
-		} else if(loc == advancingUnit_ && it != units_.end()) {
-			//set the advancing colour to white if it's a non-chaotic unit,
-			//otherwise black
-			blend_with = it->second.type().alignment() == unit_type::CHAOTIC ?
-			                                        0x0001 : 0xFFFF;
-			highlight_ratio = advancingAmount_;
-		}
+	const bool show_time = (i+1 == route_.steps.end());
 
-		draw_unit(xpos-xsrc,ypos-ysrc,unit_image,face_left,false,
-		          highlight_ratio,blend_with);
-	}
+	const bool left_foot = is_even(i - route_.steps.begin());
 
-	const bool energy_uses_alpha = highlight_ratio < 1.0 && blend_with == 0;
+	//generally we want the footsteps facing toward the direction they're going
+	//to go next.
+	//if we're on the last step, then we want them facing according to where
+	//they came from, so we move i back by one
+	if(i+1 == route_.steps.end() && i != route_.steps.begin())
+		--i;
 
-	surface_lock dstlock(dst);
-	surface_lock energy_lock(energy_image);
+	gamemap::location::DIRECTION direction = gamemap::location::NORTH;
 
-	for(j = ypos; j != yend; ++j) {
-		const int yloc = ysrc+j-ypos;
-		const int xoffset = abs(yloc - static_cast<int>(zoom_/2.0))/2;
-
-		int xdst = xpos;
-		if(xoffset > xsrc) {
-			xdst += xoffset - xsrc;
-			if(xend < xdst)
-				continue;
-		}
-
-		const int maxlen = static_cast<int>(zoom_) - xoffset*2;
-		int len = ((xend - xdst) > maxlen) ? maxlen : xend - xdst;
-
-		short* startdst = dstlock.pixels() + j*dst->w + xdst;
-
-		const Pixel replace_energy =
-		             Pixel(SDL_MapRGB(energy_image->format,0xFF,0xFF,0xFF));
-		const short new_energy = yloc >= show_energy_after ?
-		                             energy_colour : energy_loss_colour;
-
-		const int skip = yloc >= energy_bar_loc.first ? skip_energy_rows:0;
-
-		short* startenergy = NULL;
-
-		const int energy_w = energy_image->w + is_odd(energy_image->w);
-		if(yloc + skip < energy_image->h) {
-			startenergy = energy_lock.pixels() + (yloc+skip)*energy_w +
-			              maximum(xoffset,xsrc);
-
-			for(int i = 0; i != len; ++i) {
-				if(startenergy != NULL && *startenergy != 0) {
-					if(!energy_uses_alpha) {
-						if(*startenergy == replace_energy) {
-							*startdst = new_energy;
-						} else {
-							*startdst = *startenergy;
-						}
-					} else {
-						Pixel p = *startenergy;
-						if(*startenergy == replace_energy) {
-							p = new_energy;
-						}
-						*startdst = alpha_blend_pixels(p,*startdst,
-						                      dst->format,highlight_ratio);
-					}
-				}
-
-				++startdst;
-
-				if(startenergy != NULL)
-					++startenergy;
+	if(i+1 != route_.steps.end()) {
+		for(int n = 0; n != 6; ++n) {
+			direction = gamemap::location::DIRECTION(n);
+			if(i->get_direction(direction) == *(i+1)) {
+				break;
 			}
 		}
+	}
+
+	static const std::string left_nw(game_config::foot_left_nw);
+	static const std::string left_n(game_config::foot_left_n);
+	static const std::string right_nw(game_config::foot_right_nw);
+	static const std::string right_n(game_config::foot_right_n);
+
+	const std::string* image_str = &left_nw;
+
+	if(left_foot) {
+		if(direction == gamemap::location::NORTH ||
+		   direction == gamemap::location::SOUTH) {
+			image_str = &left_n;
+		} else {
+			image_str = &left_nw;
+		}
+	} else {
+		if(direction == gamemap::location::NORTH ||
+		   direction == gamemap::location::SOUTH) {
+			image_str = &right_n;
+		} else {
+			image_str = &right_nw;
+		}
+	}
+
+	scoped_sdl_surface image(image::get_image(*image_str));
+	if(image == NULL) {
+		std::cerr << "Could not find image: " << *image_str << "\n";
+		return;
+	}
+
+	const bool hflip = !(direction > gamemap::location::NORTH &&
+	                     direction <= gamemap::location::SOUTH);
+	const bool vflip = (direction >= gamemap::location::SOUTH_EAST &&
+	                    direction <= gamemap::location::SOUTH_WEST);
+
+	if(!hflip) {
+		image.assign(image::reverse_image(image));
+	}
+
+	draw_unit(xloc,yloc,image,vflip,0.5);
+
+	if(show_time && route_.move_left > 0 && route_.move_left < 10) {
+		//draw number in yellow if terrain is light, else draw in black
+		gamemap::TERRAIN terrain = map_.get_terrain(loc);
+
+		const SDL_Rect& rect = map_area();
+		std::string str(1,'x');
+		str[0] = '1' + route_.move_left;
+		const SDL_Rect& text_area = font::text_area(str,18);
+		const int x = xloc + zoom_/2 - text_area.w/2;
+		const int y = yloc + zoom_/2 - text_area.h/2;
+
+		//draw the text with a black outline
+		font::draw_text(this,rect,18,font::DARK_COLOUR,str,x-1,y-1);
+		font::draw_text(this,rect,18,font::DARK_COLOUR,str,x-1,y);
+		font::draw_text(this,rect,18,font::DARK_COLOUR,str,x-1,y+1);
+		font::draw_text(this,rect,18,font::DARK_COLOUR,str,x,y-1);
+		font::draw_text(this,rect,18,font::DARK_COLOUR,str,x+1,y-1);
+		font::draw_text(this,rect,18,font::DARK_COLOUR,str,x+1,y);
+		font::draw_text(this,rect,18,font::DARK_COLOUR,str,x+1,y+1);
+		font::draw_text(this,rect,18,font::DARK_COLOUR,str,x,y+1);
+		font::draw_text(this,rect,18,font::YELLOW_COLOUR,str,x,y);
 	}
 }
 
 namespace {
-const std::string& get_direction(int n)
+const std::string& get_direction(size_t n)
 {
-	static std::map<int,std::string> dirs;
-	if(dirs.empty()) {
-		dirs[0] = "-n";
-		dirs[1] = "-ne";
-		dirs[2] = "-se";
-		dirs[3] = "-s";
-		dirs[4] = "-sw";
-		dirs[5] = "-nw";
-	}
-
-	return dirs[n];
+	const static std::string dirs[6] = {"-n","-ne","-se","-s","-sw","-nw"};
+	return dirs[n >= sizeof(dirs)/sizeof(*dirs) ? 0 : n];
 }
 
 }
 
-std::vector<SDL_Surface*> display::getAdjacentTerrain(int x, int y,
-                                                      IMAGE_TYPE image_type)
+bool angle_is_northern(size_t n)
 {
-	std::vector<SDL_Surface*> res;
+	const static bool results[6] = {true,false,false,false,false,true};
+	return results[n >= sizeof(results)/sizeof(*results) ? 0 : n];
+}
+
+const std::string& get_angle_direction(size_t n)
+{
+	const static std::string dirs[6] = {"-ne","-e","-se","-sw","-w","-nw"};
+	return dirs[n >= sizeof(dirs)/sizeof(*dirs) ? 0 : n];
+}
+#if 0
+std::vector<shared_sdl_surface> display::getAdjacentTerrain(int x, int y, image::TYPE image_type, ADJACENT_TERRAIN_TYPE terrain_type)
+{
+	std::vector<shared_sdl_surface> res;
 	gamemap::location loc(x,y);
 
-	const gamemap::TERRAIN current_terrain = map_.on_board(loc) ? map_[x][y]:0;
+	const gamemap::TERRAIN current_terrain = map_.get_terrain(loc);
 
-	std::vector<bool> done(true,6);
 	gamemap::location adjacent[6];
 	get_adjacent_tiles(loc,adjacent);
 	int tiles[6];
 	for(int i = 0; i != 6; ++i) {
-		tiles[i] = map_.on_board(adjacent[i]) ?
-				   (int)map_[adjacent[i].x][adjacent[i].y] :
-				   (int)gamemap::VOID_TERRAIN;
+		if(terrain_type == ADJACENT_FOREGROUND && shrouded(adjacent[i].x,adjacent[i].y))
+			tiles[i] = gamemap::VOID_TERRAIN;
+		else if(terrain_type == ADJACENT_FOREGROUND && !fogged(x,y) && fogged(adjacent[i].x,adjacent[i].y))
+			tiles[i] = gamemap::FOGGED;
+		else
+			tiles[i] = map_.get_terrain(adjacent[i]);
 	}
 
-	const std::vector<gamemap::TERRAIN>& precedence =
-	                                 map_.get_terrain_precedence();
+	static std::vector<gamemap::TERRAIN> fog_shroud;
+	if(fog_shroud.empty()) {
+		fog_shroud.push_back(gamemap::VOID_TERRAIN);
+		fog_shroud.push_back(gamemap::FOGGED);
+	}
+
+	const std::vector<gamemap::TERRAIN>& precedence = (terrain_type == ADJACENT_BACKGROUND) ?
+	                                             map_.get_terrain_precedence() : fog_shroud;
 	std::vector<gamemap::TERRAIN>::const_iterator terrain =
 	       std::find(precedence.begin(),precedence.end(),current_terrain);
 
-	if(terrain == precedence.end())
+	if(terrain == precedence.end()) {
 		terrain = precedence.begin();
-	else
+	} else {
 		++terrain;
+		while(terrain != precedence.end() &&
+		      map_.get_terrain_info(*terrain).equal_precedence()) {
+			++terrain;
+		}
+	}
 
 	for(; terrain != precedence.end(); ++terrain){
 		//find somewhere that doesn't have overlap to use as a starting point
@@ -1260,12 +1670,13 @@ std::vector<SDL_Surface*> display::getAdjacentTerrain(int x, int y,
 		//find all the directions overlap occurs from
 		for(int i = (start+1)%6, n = 0; i != start && n != 6; ++n) {
 			if(tiles[i] == *terrain) {
-				SDL_Surface* surface = NULL;
+				shared_sdl_surface surface(NULL);
 				std::ostringstream stream;
-				for(int n = 0; tiles[i] == *terrain && n!=6; i = (i+1)%6, ++n) {
+				for(int n = 0; *terrain == tiles[i] && n != 6; i = (i+1)%6, ++n) {
+
 					stream << get_direction(i);
-					SDL_Surface* const new_surface = getTerrain(
-					                    *terrain,image_type,x,y,stream.str());
+					const shared_sdl_surface new_surface(get_terrain(
+					                    *terrain,image_type,x,y,stream.str()));
 
 					if(new_surface == NULL) {
 						//if we don't have any surface at all,
@@ -1288,260 +1699,223 @@ std::vector<SDL_Surface*> display::getAdjacentTerrain(int x, int y,
 
 	return res;
 }
-
-SDL_Surface* display::getTerrain(gamemap::TERRAIN terrain,IMAGE_TYPE image_type,
-                                 int x, int y, const std::string& direction)
-{
-	const bool tower = (terrain == gamemap::TOWER);
-	std::string image = "terrain/" + (direction.empty() ?
-	                           map_.get_terrain_info(terrain).image(x,y) :
-	                           map_.get_terrain_info(terrain).default_image());
-
-	if(tower) {
-		size_t i;
-		for(i = 0; i != teams_.size(); ++i) {
-			if(teams_[i].owns_tower(gamemap::location(x,y))) {
-				char buf[50];
-				sprintf(buf,"-team%d",i+1);
-				image += buf;
-				break;
-			}
-		}
-
-		if(i == teams_.size()) {
-			image += "-neutral";
-		}
-	}
-
-	if(terrain == gamemap::CASTLE &&
-	   map_.is_starting_position(gamemap::location(x,y))) {
-		image = "terrain/keep";
-	}
-
-	image += direction + ".png";
-
-	return getImage(image,image_type);
-}
-
-void display::blit_surface(int x, int y, SDL_Surface* surface)
-{
-	SDL_Surface* const target = video().getSurface();
-
-	const int srcx = x < 0 ? -x : 0;
-	const int srcw = x + surface->w > target->w ? target->w - x :
-	                                              surface->w - srcx;
-	const int srcy = y < 0 ? -y : 0;
-	const int srch = y + surface->h > target->h ? target->h - x :
-	                                              surface->h - srcy;
-
-	if(srcw <= 0 || srch <= 0 || srcx >= surface->w || srcy >= surface->h)
-		return;
-
-	if(x < 0)
-		x = 0;
-
-	if(y < 0)
-		y = 0;
-
-	//lines are padded to always fit on 4-byte boundaries, so see if there
-	//is padding at the beginning of every line
-	const int padding = is_odd(surface->w);
-	const int surface_width = surface->w + padding;
-
-	surface_lock srclock(surface);
-	surface_lock dstlock(target);
-
-	const short* src = srclock.pixels() + srcy*surface_width + srcx;
-	short* dst = dstlock.pixels() + y*target->w + x;
-
-	static const short transperant = 0;
-
-	for(int i = 0; i != srch; ++i) {
-		const short* s = src + i*surface_width + padding;
-		const short* const end = s + srcw;
-		short* d = dst + i*target->w;
-		while(s != end) {
-			if(*s != transperant) {
-				*d = *s;
-			}
-
-			++s;
-			++d;
-		}
-	}
-}
-
-SDL_Surface* display::getImage(const std::string& filename,
-				               display::IMAGE_TYPE type)
-{
-	if(type == GREYED)
-		return getImageTinted(filename,GREY_IMAGE);
-	else if(type == BRIGHTENED)
-		return getImageTinted(filename,BRIGHTEN_IMAGE);
-
-	std::map<std::string,SDL_Surface*>::iterator i;
-
-	if(type == SCALED) {
-		i = scaledImages_.find(filename);
-		if(i != scaledImages_.end())
-			return i->second;
-	}
-
-	i = images_.find(filename);
-
-	if(i == images_.end()) {
-		const std::string images_path = "images/";
-		const std::string images_filename = images_path + filename;
-		SDL_Surface* surf = NULL;
-
-#ifdef WESNOTH_PATH
-		const std::string& fullpath = WESNOTH_PATH + std::string("/") +
-		                              images_filename;
-		surf = IMG_Load(fullpath.c_str());
 #endif
 
-		if(surf == NULL)
-			surf = IMG_Load(images_filename.c_str());
 
-		if(surf == NULL) {
-			images_.insert(std::pair<std::string,SDL_Surface*>(filename,NULL));
-			return NULL;
+std::vector<std::string> display::get_fog_shroud_graphics(const gamemap::location& loc)
+{
+	std::vector<std::string> res;
+  
+	gamemap::location adjacent[6];   
+	bool transition_done[6];
+	get_adjacent_tiles(loc,adjacent);
+	int tiles[6];
+	static const int terrain_types[] = { gamemap::VOID_TERRAIN, gamemap::FOGGED, 0 };
+
+	for(int i = 0; i != 6; ++i) {
+		if(shrouded(adjacent[i].x,adjacent[i].y))
+			tiles[i] = gamemap::VOID_TERRAIN;
+		else if(!fogged(loc.x,loc.y) && fogged(adjacent[i].x,adjacent[i].y))
+			tiles[i] = gamemap::FOGGED;
+		else
+			tiles[i] = 0;
+	}
+
+
+	for(const int * terrain = terrain_types; *terrain != 0; terrain ++) {
+		//find somewhere that doesn't have overlap to use as a starting point
+		int start;
+		for(start = 0; start != 6; ++start) {
+			if(tiles[start] != *terrain)
+				break;
 		}
 
-		SDL_Surface* const conv = SDL_ConvertSurface(surf,
-						                     screen_.getSurface()->format,
-											 SDL_SWSURFACE);
-		SDL_FreeSurface(surf);
-
-		i = images_.insert(std::pair<std::string,SDL_Surface*>(filename,conv))
-				               .first;
-	}
-
-	if(i->second == NULL)
-		return NULL;
-
-	if(type == UNSCALED) {
-		return i->second;
-	}
-
-	const int z = static_cast<int>(zoom_);
-	SDL_Surface* const new_surface = scale_surface(i->second,z,z);
-
-	if(new_surface == NULL)
-		return NULL;
-
-	scaledImages_.insert(std::pair<std::string,SDL_Surface*>(filename,
-								                             new_surface));
-	return new_surface;
-}
-
-SDL_Surface* display::getImageTinted(const std::string& filename, TINT tint)
-{
-	std::map<std::string,SDL_Surface*>& image_map =
-	       tint == GREY_IMAGE ? greyedImages_ : brightenedImages_;
-
-	const std::map<std::string,SDL_Surface*>::iterator itor =
-			image_map.find(filename);
-
-	if(itor != image_map.end())
-		return itor->second;
-
-	SDL_Surface* const base = getImage(filename,SCALED);
-	if(base == NULL)
-		return NULL;
-
-	SDL_Surface* const surface =
-		           SDL_CreateRGBSurface(SDL_SWSURFACE,base->w,base->h,
-					                     base->format->BitsPerPixel,
-										 base->format->Rmask,
-										 base->format->Gmask,
-										 base->format->Bmask,
-										 base->format->Amask);
-
-	image_map.insert(std::pair<std::string,SDL_Surface*>(filename,surface));
-
-	surface_lock srclock(base);
-	surface_lock dstlock(surface);
-	short* begin = srclock.pixels();
-	const short* const end = begin + base->h*(base->w + (base->w%2));
-	short* dest = dstlock.pixels();
-
-	const int rmax = 0xFF;
-	const int gmax = 0xFF;
-	const int bmax = 0xFF;
-
-	while(begin != end) {
-		Uint8 red, green, blue;
-		SDL_GetRGB(*begin,base->format,&red,&green,&blue);
-		int r = int(red), g = int(green), b = int(blue);
-
-		if(tint == GREY_IMAGE) {
-			const double greyscale = (double(r)/(double)rmax +
-					                  double(g)/(double)gmax +
-							          double(b)/(double)bmax)/3.0;
-
-			r = int(rmax*greyscale);
-			g = int(gmax*greyscale);
-			b = int(bmax*greyscale);
-		} else {
-			r = int(double(r)*1.5);
-			g = int(double(g)*1.5);
-			b = int(double(b)*1.5);
-
-			if(r > rmax)
-				r = rmax;
-
-			if(g > gmax)
-				g = gmax;
-
-			if(b > bmax)
-				b = bmax;
+		if(start == 6) {
+			start = 0;
 		}
 
-		*dest = SDL_MapRGB(base->format,r,g,b);
+		//find all the directions overlap occurs from
+		for(int i = (start+1)%6, n = 0; i != start && n != 6; ++n) {
+			if(tiles[i] == *terrain) {
+				std::ostringstream stream;
+				std::string name;
+				// if(*terrain == gamemap::VOID_TERRAIN)
+				//	stream << "void";
+				//else
+				//	stream << "fog";
+				stream << map_.get_terrain_info(*terrain).default_image();
 
-		++dest;
-		++begin;
+				for(int n = 0; *terrain == tiles[i] && n != 6; i = (i+1)%6, ++n) {
+					stream << get_direction(i);
+
+					if(!image::exists("terrain/" + stream.str() + ".png")) {
+						//if we don't have any surface at all,
+						//then move onto the next overlapped area
+						if(name.empty())
+							i = (i+1)%6;
+						break;
+					} else {
+						name = stream.str();
+					}
+				}
+
+				if(!name.empty()) {
+					res.push_back(name);
+				}
+			} else {
+				i = (i+1)%6;
+			}
+		}
 	}
 
-	return surface;
+	return res;
 }
 
-SDL_Surface* display::getMinimap(int w, int h)
+std::vector<shared_sdl_surface> display::get_terrain_images(int x, int y, image::TYPE image_type, ADJACENT_TERRAIN_TYPE terrain_type)
 {
-	if(minimap_ == NULL) {
-		SDL_Surface* const surface = screen_.getSurface();
-		minimap_ = SDL_CreateRGBSurface(SDL_SWSURFACE,map_.x(),map_.y(),
-					                     surface->format->BitsPerPixel,
-										 surface->format->Rmask,
-										 surface->format->Gmask,
-										 surface->format->Bmask,
-										 surface->format->Amask);
-		if(minimap_ == NULL)
-			return NULL;
+	std::vector<shared_sdl_surface> res;
+	gamemap::location loc(x,y);
 
-		const int xpad = is_odd(minimap_->w);
+	terrain_builder::ADJACENT_TERRAIN_TYPE builder_terrain_type =
+	      (terrain_type == ADJACENT_FOREGROUND ?
+		  terrain_builder::ADJACENT_FOREGROUND : terrain_builder::ADJACENT_BACKGROUND);
+	const std::vector<image::locator>* const terrains = builder_.get_terrain_at(loc,builder_terrain_type);
 
-		surface_lock lock(minimap_);
-		short* data = lock.pixels();
-		for(int y = 0; y != map_.y(); ++y) {
-			for(int x = 0; x != map_.x(); ++x) {
+	if(terrains != NULL) {
+		for(std::vector<image::locator>::const_iterator it = terrains->begin(); it != terrains->end(); ++it) {
+			image::locator image = *it;
+			image.filename = "terrain/" + it->filename;
 
-				*data = map_.get_terrain_info(map_[x][y]).get_rgb().
-				                                     format(surface->format);
-				++data;
+			const shared_sdl_surface surface(get_terrain(image,image_type,x,y,true));
+			if(surface != NULL) {
+				res.push_back(surface);
+			}
+		}
+	}
+
+	if(terrain_type == ADJACENT_FOREGROUND) {
+		const std::vector<std::string> fog_shroud = get_fog_shroud_graphics(gamemap::location(x,y));
+
+		if(!fog_shroud.empty()) {
+			for(std::vector<std::string>::const_iterator it = fog_shroud.begin(); it != fog_shroud.end(); ++it) {
+				image::locator image(*it);
+				image.filename = "terrain/" + *it;
+
+				const shared_sdl_surface surface(get_terrain(image,image_type,x,y,true));
+				if(surface != NULL) {
+					res.push_back(surface);
+				}
 			}
 
-			data += xpad;
 		}
 	}
 
-	while(minimap_ != NULL && minimap_->w*2 < w && minimap_->h*2 < h) {
-		SDL_Surface* const surf = minimap_;
-		minimap_ = scale_surface(minimap_,minimap_->w*2,minimap_->h*2);
-		SDL_FreeSurface(surf);
+	return res;
+}
+
+SDL_Surface* display::get_terrain(const image::locator& image, image::TYPE image_type,
+                                 int x, int y, bool search_tod)
+{
+	SDL_Surface* im = NULL;
+
+	const time_of_day& tod = status_.get_time_of_day();
+	const time_of_day& tod_at = timeofday_at(status_,units_,gamemap::location(x,y));
+
+	//see if there is a time-of-day specific version of this image
+	if(search_tod) {
+		image::locator tod_image = image;
+		tod_image.filename = image.filename + "-" + tod.id + ".png";
+		im = image::get_image(tod_image,image_type);
+
+		if(im != NULL) {
+			return im;
+		}
 	}
 
+	image::locator tmp = image;
+	tmp.filename += ".png";
+
+	im = image::get_image(tmp,image_type);
+	if(im == NULL) {
+		return NULL;
+	}
+
+	//see if this tile is illuminated to a different colour than it'd
+	//normally be displayed as
+	const int radj = tod_at.red - tod.red;
+	const int gadj = tod_at.green - tod.green;
+	const int badj = tod_at.blue - tod.blue;
+	
+	if((radj|gadj|badj) != 0 && im != NULL) {
+		const scoped_sdl_surface backup(im);
+		im = adjust_surface_colour(im,radj,gadj,badj);
+		if(im == NULL)
+			std::cerr << "could not adjust surface..\n";
+	}
+	
+	return im;	
+}
+#if 0
+SDL_Surface* display::get_terrain(gamemap::TERRAIN terrain, image::TYPE image_type,
+                                 int x, int y, const std::string& direction)
+{
+	std::string image = "terrain/" + (direction.empty() ?
+	                           map_.get_terrain_info(terrain).image(x,y) :
+	                           map_.get_terrain_info(terrain).adjacent_image());
+
+	image += direction;
+
+	SDL_Surface* im = get_terrain(image, image_type, x, y, direction.empty());
+	
+	if(im == NULL && direction.empty()) {
+		im = image::get_image("terrain/" +
+		        map_.get_terrain_info(terrain).default_image() + ".png");
+	}
+
+	return im;
+}
+#endif
+SDL_Surface* display::get_flag(gamemap::TERRAIN terrain, int x, int y)
+{
+	const bool village = map_.is_village(terrain);
+	if(!village)
+		return NULL;
+
+	const gamemap::location loc(x,y);
+
+	for(size_t i = 0; i != teams_.size(); ++i) {
+		if(teams_[i].owns_village(loc) && (!fogged(x,y) || !shrouded(x,y) && !teams_[currentTeam_].is_enemy(i+1))) {
+			char buf[50];
+			sprintf(buf,"terrain/flag-team%d.png",team::get_side_colour_index(int(i+1)));
+			return image::get_image(buf);
+		}
+	}
+
+	return NULL;
+}
+
+void display::blit_surface(int x, int y, SDL_Surface* surface, SDL_Rect* srcrect, SDL_Rect* clip_rect)
+{
+	SDL_Surface* const target = video().getSurface();
+	SDL_Rect dst = {x,y,0,0};
+	
+	if(clip_rect != NULL) {
+		const clip_rect_setter clip_setter(target,*clip_rect);
+		SDL_BlitSurface(surface,srcrect,target,&dst);
+	} else {
+		SDL_BlitSurface(surface,srcrect,target,&dst);
+	}
+}
+
+SDL_Surface* display::get_minimap(int w, int h)
+{
+	if(minimap_ == NULL) {
+		minimap_ = image::getMinimap(w,h,map_,
+				status_.get_time_of_day().lawful_bonus,
+				team_valid() ? &teams_[currentTeam_] : NULL);
+	}
+
+	sdl_add_ref(minimap_);
 	return minimap_;
 }
 
@@ -1571,569 +1945,122 @@ void display::set_route(const paths::route* route)
 	invalidate_route();
 }
 
-void display::move_unit(const std::vector<gamemap::location>& path, unit& u)
+void display::remove_footstep(const gamemap::location& loc)
 {
-	for(size_t i = 0; i+1 < path.size(); ++i) {
-		if(path[i+1].x > path[i].x) {
-			u.set_facing_left(true);
-		} else if(path[i+1].x < path[i].x) {
-			u.set_facing_left(false);
-		}
-
-		move_unit_between(path[i],path[i+1],u);
-	}
+	const std::vector<gamemap::location>::iterator it = std::find(route_.steps.begin(),route_.steps.end(),loc);
+	if(it != route_.steps.end())
+		route_.steps.erase(it);
 }
 
-double display::get_location_x(const gamemap::location& loc) const
+void display::float_label(const gamemap::location& loc, const std::string& text,
+						  int red, int green, int blue)
 {
-	return static_cast<double>(loc.x)*zoom_*0.75 - xpos_;
-}
-
-double display::get_location_y(const gamemap::location& loc) const
-{
-	return static_cast<double>(loc.y)*zoom_ - ypos_ +
-					         ((loc.x % 2) == 1 ? zoom_/2.0 : 0.0);
-}
-
-
-bool display::unit_attack_ranged(const gamemap::location& a,
-                                 const gamemap::location& b, int damage,
-                                 const attack_type& attack)
-{
-	const unit_map::iterator def = units_.find(b);
-
-	def->second.set_defending(true,attack_type::LONG_RANGE);
-
-	//the missile frames are based around the time when the missile impacts.
-	//the 'real' frames are based around the time when the missile launches.
-	const int first_missile = minimum<int>(-100,
-	                        attack.get_first_frame(attack_type::MISSILE_FRAME));
-	const int last_missile = attack.get_last_frame(attack_type::MISSILE_FRAME);
-
-	const int real_last_missile = last_missile - first_missile;
-	const int missile_impact = -first_missile;
-
-	const int time_resolution = 20;
-
-	const std::vector<attack_type::sfx>& sounds = attack.sound_effects();
-	std::vector<attack_type::sfx>::const_iterator sfx_it = sounds.begin();
-
-	const bool hits = damage > 0;
-	const int begin_at = attack.get_first_frame();
-	const int end_at   = maximum((damage+1)*time_resolution+missile_impact,
-					       maximum(attack.get_last_frame(),real_last_missile));
-
-	const double xsrc = get_location_x(a);
-	const double ysrc = get_location_y(a);
-	const double xdst = get_location_x(b);
-	const double ydst = get_location_y(b);
-
-	gamemap::location update_tiles[6];
-	get_adjacent_tiles(a,update_tiles);
-
-	const bool vflip = b.y > a.y || b.y == a.y && is_even(a.x);
-	const bool hflip = b.x < a.x;
-	const attack_type::FRAME_DIRECTION dir =
-	         (a.x == b.x) ? attack_type::VERTICAL:attack_type::DIAGONAL;
-
-	bool dead = false;
-	const int drain_speed = 1;
-
-	int flash_num = 0;
-
-	int ticks = SDL_GetTicks();
-
-	for(int i = begin_at; i < end_at; i += time_resolution) {
-		check_keys(*this);
-
-		//this is a while instead of an if, because there might be multiple
-		//sounds playing simultaneously or close together
-		while(!update_locked() && sfx_it != sounds.end() && i >= sfx_it->time) {
-			const std::string& sfx = hits ? sfx_it->on_hit : sfx_it->on_miss;
-			if(sfx.empty() == false) {
-				sound::play_sound(hits ? sfx_it->on_hit : sfx_it->on_miss);
-			}
-
-			++sfx_it;
-		}
-
-		const std::string* const unit_image = attack.get_frame(i);
-
-		if(!update_locked()) {
-			SDL_Surface* const image = (unit_image == NULL) ?
-			                                NULL : getImage(*unit_image);
-			draw_tile(a.x,a.y,image);
-		}
-
-		Pixel defensive_colour = 0;
-		double defensive_alpha = 1.0;
-
-		if(damage > 0 && i >= missile_impact) {
-			if(def->second.gets_hit(drain_speed)) {
-				dead = true;
-				damage = 0;
-			} else {
-				damage -= drain_speed;
-			}
-
-			if(flash_num == 0 || flash_num == 2) {
-				defensive_alpha = 0.0;
-				defensive_colour = 0xF000;
-			}
-
-			++flash_num;
-		}
-
-		for(int j = 0; j != 6; ++j) {
-			if(update_tiles[j] != b) {
-				draw_tile(update_tiles[j].x,update_tiles[j].y);
-			}
-		}
-
-		draw_tile(b.x,b.y,NULL,defensive_alpha,defensive_colour);
-
-		if(i >= 0 && i < real_last_missile && !update_locked()) {
-			const int missile_frame = i + first_missile;
-
-			const std::string* missile_image
-			         = attack.get_frame(missile_frame,NULL,
-			                            attack_type::MISSILE_FRAME,dir);
-
-			static const std::string default_missile("missile-n.png");
-			static const std::string default_diag_missile("missile-ne.png");
-			if(missile_image == NULL) {
-				if(dir == attack_type::VERTICAL)
-					missile_image = &default_missile;
-				else
-					missile_image = &default_diag_missile;
-			}
-
-			SDL_Surface* const img = getImage(*missile_image);
-			if(img != NULL) {
-				double pos = double(missile_impact - i)/double(missile_impact);
-				if(pos < 0.0)
-					pos = 0.0;
-				const int xpos = int(xsrc*pos + xdst*(1.0-pos));
-				const int ypos = int(ysrc*pos + ydst*(1.0-pos));
-
-				draw_unit(xpos,ypos,img,!hflip,vflip);
-			}
-		}
-
-		const int wait_time = ticks + time_resolution - SDL_GetTicks();
-		if(wait_time > 0 && !turbo() && !update_locked())
-			SDL_Delay(wait_time);
-
-		ticks = SDL_GetTicks();
-
-		update_display();
-	}
-
-	def->second.set_defending(false);
-
-	if(dead) {
-		unit_die(b);
-	}
-
-	return dead;
-}
-
-void display::unit_die(const gamemap::location& loc, SDL_Surface* image)
-{
-	if(update_locked())
+	if(preferences::show_floating_labels() == false || fogged(loc.x,loc.y)) {
 		return;
-
-	const int frame_time = 30;
-	int ticks = SDL_GetTicks();
-
-	for(double alpha = 1.0; alpha > 0.0; alpha -= 0.05) {
-		draw_tile(loc.x,loc.y,image,alpha);
-
-		const int wait_time = ticks + frame_time - SDL_GetTicks();
-
-		if(wait_time > 0 && !turbo())
-			SDL_Delay(wait_time);
-
-		ticks = SDL_GetTicks();
-
-		update_display();
-	}
-}
-
-bool display::unit_attack(const gamemap::location& a,
-                          const gamemap::location& b, int damage,
-						  const attack_type& attack)
-{
-	log_scope("unit_attack");
-	invalidate_all();
-	draw(true,true);
-
-	const unit_map::iterator att = units_.find(a);
-	assert(att != units_.end());
-
-	unit& attacker = att->second;
-
-	const unit_map::iterator def = units_.find(b);
-	assert(def != units_.end());
-
-	if(b.x > a.x) {
-		att->second.set_facing_left(true);
-		def->second.set_facing_left(false);
-	} else if(b.x < a.x) {
-		att->second.set_facing_left(false);
-		def->second.set_facing_left(true);
 	}
 
-	if(attack.range() == attack_type::LONG_RANGE) {
-		return unit_attack_ranged(a,b,damage,attack);
-	}
-
-	const bool hits = damage > 0;
-	const std::vector<attack_type::sfx>& sounds = attack.sound_effects();
-	std::vector<attack_type::sfx>::const_iterator sfx_it = sounds.begin();
-
-	const int time_resolution = 20;
-
-	def->second.set_defending(true,attack_type::SHORT_RANGE);
-
-	const int begin_at = minimum<int>(-200,attack.get_first_frame());
-	const int end_at = maximum<int>((damage+1)*time_resolution,
-	                                       maximum<int>(200,
-	                                         attack.get_last_frame()));
-
-	const double xsrc = get_location_x(a);
-	const double ysrc = get_location_y(a);
-	const double xdst = get_location_x(b)*0.6 + xsrc*0.4;
-	const double ydst = get_location_y(b)*0.6 + ysrc*0.4;
-
-	gamemap::location update_tiles[6];
-	get_adjacent_tiles(b,update_tiles);
-
-	bool dead = false;
-	const int drain_speed = 1;
-
-	int flash_num = 0;
-
-	int ticks = SDL_GetTicks();
-
-	hiddenUnit_ = a;
-
-	for(int i = begin_at; i < end_at; i += time_resolution) {
-		check_keys(*this);
-
-		//this is a while instead of an if, because there might be multiple
-		//sounds playing simultaneously or close together
-		while(!update_locked() && sfx_it != sounds.end() && i >= sfx_it->time) {
-			const std::string& sfx = hits ? sfx_it->on_hit : sfx_it->on_miss;
-			if(sfx.empty() == false) {
-				sound::play_sound(hits ? sfx_it->on_hit : sfx_it->on_miss);
-			}
-
-			++sfx_it;
-		}
-
-		for(int j = 0; j != 6; ++j) {
-			draw_tile(update_tiles[j].x,update_tiles[j].y);
-		}
-
-		int defender_colour = 0;
-		double defender_alpha = 1.0;
-
-		if(damage > 0 && i >= 0) {
-			if(def->second.gets_hit(drain_speed)) {
-				dead = true;
-				damage = 0;
-			} else {
-				damage -= drain_speed;
-			}
-
-			if(flash_num == 0 || flash_num == 2) {
-				defender_alpha = 0.0;
-				defender_colour = 0xF000;
-			}
-
-			++flash_num;
-		}
-
-		draw_tile(b.x,b.y,NULL,defender_alpha,defender_colour);
-
-		int xoffset = 0;
-		const std::string* unit_image = attack.get_frame(i,&xoffset);
-		if(!attacker.facing_left())
-			xoffset *= -1;
-
-		xoffset = int(double(xoffset)*(zoom_/DefaultZoom));
-
-		if(unit_image == NULL)
-			unit_image = &attacker.image();
-
-		SDL_Surface* const image = (unit_image == NULL) ?
-		                                NULL : getImage(*unit_image);
-
-		const double pos = double(i)/double(i < 0 ? begin_at : end_at);
-		const int posx = int(pos*xsrc + (1.0-pos)*xdst) + xoffset;
-		const int posy = int(pos*ysrc + (1.0-pos)*ydst);
-
-		if(image != NULL && !update_locked())
-			draw_unit(posx,posy,image,attacker.facing_left());
-
-		const int wait_time = ticks + time_resolution - SDL_GetTicks();
-		if(wait_time > 0 && !turbo() && !update_locked())
-			SDL_Delay(wait_time);
-
-		ticks = SDL_GetTicks();
-
-		update_display();
-	}
-
-	hiddenUnit_ = gamemap::location();
-	def->second.set_defending(false);
-
-	if(dead) {
-		unit_die(b);
-	}
-
-	return dead;
-}
-
-void display::move_unit_between(const gamemap::location& a,
-                                const gamemap::location& b,
-								const unit& u)
-{
-	if(update_locked())
-		return;
-
-	const bool face_left = u.facing_left();
-
-	const double side_threshhold = 80.0;
-
-	double xsrc = get_location_x(a);
-	double ysrc = get_location_y(a);
-	double xdst = get_location_x(b);
-	double ydst = get_location_y(b);
-
-	const double nsteps = turbo() ? 2.0 : 10.0;
-	const double xstep = (xdst - xsrc)/nsteps;
-	const double ystep = (ydst - ysrc)/nsteps;
-
-	const int time_between_frames = 10;
-	int ticks = SDL_GetTicks();
-
-	int skips = 0;
-
-	for(double i = 0.0; i < nsteps; i += 1.0) {
-		check_keys(*this);
-
-		//checking keys may have invalidated all images (if they have
-		//zoomed in or out), so reget the image here
-		SDL_Surface* const image = getImage(u.type().image());
-		if(image == NULL) {
-			std::cerr << "failed to get image " << u.type().image() << "\n";
-			return;
-		}
-
-		xsrc = get_location_x(a);
-		ysrc = get_location_y(a);
-		xdst = get_location_x(b);
-		ydst = get_location_y(b);
-
-		double xloc = xsrc + xstep*i;
-		double yloc = ysrc + ystep*i;
-
-		//we try to scroll the map if the unit is at the edge.
-		//keep track of the old position, and if the map moves at all,
-		//then recenter it on the unit
-		double oldxpos = xpos_;
-		double oldypos = ypos_;
-		if(xloc < side_threshhold) {
-			scroll(xloc - side_threshhold,0.0);
-		}
-
-		if(yloc < side_threshhold) {
-			scroll(0.0,yloc - side_threshhold);
-		}
-
-		if(xloc + double(image->w) > this->mapx() - side_threshhold) {
-			scroll(((xloc + double(image->w)) -
-			        (this->mapx() - side_threshhold)),0.0);
-		}
-
-		if(yloc + double(image->h) > this->y() - side_threshhold) {
-			scroll(0.0,((yloc + double(image->h)) -
-			           (this->y() - side_threshhold)));
-		}
-
-		if(oldxpos != xpos_ || oldypos != ypos_) {
-			scroll_to_tile(b.x,b.y,WARP);
-		}
-
-		xsrc = get_location_x(a);
-		ysrc = get_location_y(a);
-		xdst = get_location_x(b);
-		ydst = get_location_y(b);
-
-		xloc = xsrc + xstep*i;
-		yloc = ysrc + ystep*i;
-
-		//invalidate the source tile and all adjacent tiles,
-		//since the unit can partially overlap adjacent tiles
-		gamemap::location adjacent[6];
-		get_adjacent_tiles(a,adjacent);
-		draw_tile(a.x,a.y);
-		for(int tile = 0; tile != 6; ++tile) {
-			draw_tile(adjacent[tile].x,adjacent[tile].y);
-		}
-
-		draw(false);
-		draw_unit((int)xloc,(int)yloc,image,face_left);
-
-		const int new_ticks = SDL_GetTicks();
-		const int wait_time = time_between_frames - (new_ticks - ticks);
-		if(wait_time > 0) {
-			SDL_Delay(wait_time);
-		}
-
-		ticks = SDL_GetTicks();
-
-		if(wait_time >= 0 || skips == 4 || (i+1.0) >= nsteps) {
-			skips = 0;
-			update_display();
-		} else {
-			++skips;
-		}
-	}
+	const SDL_Color colour = {red,green,blue,255};
+	font::add_floating_label(text,24,colour,get_location_x(loc)+zoom_/2,get_location_y(loc),
+	                         0,-2,60,screen_area(),font::CENTER_ALIGN,NULL,0,font::ANCHOR_LABEL_MAP);
 }
 
 void display::draw_unit(int x, int y, SDL_Surface* image,
-                        bool reverse, bool upside_down,
-                        double alpha, Pixel blendto)
+		bool upside_down, double alpha, Uint32 blendto, double submerged,
+		SDL_Surface* ellipse_back, SDL_Surface* ellipse_front)
 {
-	if(updatesLocked_) {
+	//calculate the y position of the ellipse. It should be the same as the y position of the image, unless
+	//the image is partially submerged, in which case the ellipse should appear to float 'on top of' the water
+	const int ellipse_ypos = y - (ellipse_back != NULL && submerged > 0.0 ? int(double(ellipse_back->h)*submerged) : 0)/2;
+	if(ellipse_back != NULL) {
+		draw_unit(x,ellipse_ypos,ellipse_back,false,blendto == 0 ? alpha : 1.0,0,0.0);
+	}
+
+	sdl_add_ref(image);
+	scoped_sdl_surface surf(image);
+
+	if(upside_down) {
+		surf.assign(flop_surface(surf));
+	}
+
+	if(alpha > 1.0) {
+		surf.assign(brighten_image(surf,alpha));
+	} else if(alpha != 1.0 && blendto != 0) {
+		surf.assign(blend_surface(surf,1.0-alpha,blendto));
+	} else if(alpha != 1.0) {
+		surf.assign(adjust_surface_alpha(surf,alpha));
+	}
+
+	if(surf == NULL) {
+		std::cerr << "surface lost...\n";
 		return;
 	}
 
-	const int w = mapx()-1;
-	const int h = this->y()-1;
-	if(x > w || y > h)
-		return;
+	const int submerge_height = minimum<int>(surf->h,maximum<int>(0,int(surf->h*(1.0-submerged))));
 
-	const int image_w = image->w + is_odd(image->w);
+	SDL_Rect clip_rect = map_area();
+	SDL_Rect srcrect = {0,0,surf->w,submerge_height};
+	blit_surface(x,y,surf,&srcrect,&clip_rect);
 
-	SDL_Surface* const screen = screen_.getSurface();
+	if(submerge_height != surf->h) {
+		surf.assign(adjust_surface_alpha(surf,0.2));
+		
+		srcrect.y = submerge_height;
+		srcrect.h = surf->h-submerge_height;
+		y += submerge_height;
 
-	surface_lock srclock(image);
-	const Pixel* src = srclock.pixels();
-
-	const int endy = (y + image->h) < h ? (y + image->h) : h;
-	const int endx = (x + image->w) < w ? (x + image->w) : w;
-	if(endx < x)
-		return;
-
-	const int len = endx - x;
-
-	if(y < 0) {
-		//this is adding to src, since y is negative
-		src -= image_w*y;
-		y = 0;
-		if(y >= endy)
-			return;
+		blit_surface(x,y,surf,&srcrect,&clip_rect);
 	}
 
-	int xoffset = 0;
-	if(x < 0) {
-		xoffset = -x;
-		x = 0;
-		if(x >= endx)
-			return;
-	}
-
-	const SDL_PixelFormat* const fmt = screen->format;
-
-	static const Pixel semi_trans = ((0x19 >> fmt->Rloss) << fmt->Rshift) |
-	                                ((0x19 >> fmt->Gloss) << fmt->Gshift) |
-	                                ((0x11 >> fmt->Bloss) << fmt->Bshift);
-
-	if(upside_down)
-		src += image_w * (endy - y - 1);
-
-	const int src_increment = image_w * (upside_down ? -1 : 1);
-
-	surface_lock screen_lock(screen);
-
-	for(; y != endy; ++y, src += src_increment) {
-		Pixel* dst = screen_lock.pixels() + y*screen->w + x;
-
-		if(alpha == 1.0) {
-			if(reverse) {
-				for(int i = xoffset; i != len; ++i) {
-					if(src[i] == semi_trans)
-						dst[i-xoffset] = alpha_blend_pixels(
-						                     0,dst[i-xoffset],fmt,0.5);
-					else if(src[i] != 0)
-						dst[i-xoffset] = src[i];
-				}
-			} else {
-				for(int i = image->w-1-xoffset; i != image->w-len-1; --i,++dst){
-					if(src[i] == semi_trans)
-						*dst = alpha_blend_pixels(0,*dst,fmt,0.5);
-					else if(src[i] != 0)
-						*dst = src[i];
-				}
-			}
-		} else {
-			if(reverse) {
-				for(int i = xoffset; i != len; ++i) {
-					const Pixel blend = blendto ? blendto : dst[i-xoffset];
-
-					if(src[i] != 0)
-						dst[i-xoffset]
-						      = alpha_blend_pixels(src[i],blend,fmt,alpha);
-				}
-			} else {
-				for(int i = image->w-1-xoffset; i != image->w-len-1; --i,++dst){
-					const Pixel blend = blendto ? blendto : *dst;
-					if(src[i] != 0)
-						*dst = alpha_blend_pixels(src[i],blend,fmt,alpha);
-				}
-			}
-		}
+	if(ellipse_front != NULL) {
+		draw_unit(x,ellipse_ypos,ellipse_front,false,blendto == 0 ? alpha : 1.0,0,0.0);
 	}
 }
 
-const std::pair<int,int>& display::calculate_energy_bar()
+struct is_energy_colour {
+	bool operator()(Uint32 colour) const { return (colour&0xFF000000) < 0x50000000 &&
+	                                              (colour&0x00FF0000) > 0x00990000 &&
+												  (colour&0x0000FF00) > 0x00009900 &&
+												  (colour&0x000000FF) > 0x00000099; }
+};
+
+const SDL_Rect& display::calculate_energy_bar(SDL_Surface* surf)
 {
-	if(energy_bar_count_.first != -1) {
-		return energy_bar_count_;
+	const std::map<SDL_Surface*,SDL_Rect>::const_iterator i = energy_bar_rects_.find(surf);
+	if(i != energy_bar_rects_.end()) {
+		return i->second;
 	}
 
-	int first_row = -1;
-	int last_row = -1;
+	int first_row = -1, last_row = -1, first_col = -1, last_col = -1;
 
-	SDL_Surface* const image = getImage("unmoved-energy.png");
+	scoped_sdl_surface image(make_neutral_surface(surf));
 
 	surface_lock image_lock(image);
-	const short* const begin = image_lock.pixels();
-
-	const Pixel colour = Pixel(SDL_MapRGB(image->format,0xFF,0xFF,0xFF));
+	const Uint32* const begin = image_lock.pixels();
 
 	for(int y = 0; y != image->h; ++y) {
-		const short* const i1 = begin + image->w*y;
-		const short* const i2 = i1 + image->w;
-		if(std::find(i1,i2,colour) != i2) {
+		const Uint32* const i1 = begin + image->w*y;
+		const Uint32* const i2 = i1 + image->w;
+		const Uint32* const itor = std::find_if(i1,i2,is_energy_colour());
+		const int count = std::count_if(itor,i2,is_energy_colour());
+
+		if(itor != i2) {
 			if(first_row == -1)
 				first_row = y;
 
+			first_col = itor - i1;
+			last_col = first_col + count;
 			last_row = y;
 		}
 	}
 
-	energy_bar_count_ = std::pair<int,int>(first_row,last_row+1);
-	return energy_bar_count_;
+	const SDL_Rect res = {first_col,first_row,last_col-first_col,last_row+1-first_row};
+	energy_bar_rects_.insert(std::pair<SDL_Surface*,SDL_Rect>(surf,res));
+	return calculate_energy_bar(surf);
 }
 
 void display::invalidate(const gamemap::location& loc)
 {
-	if(!invalidateAll_ && loc.valid()) {
+	if(!invalidateAll_) {
 		invalidated_.insert(loc);
 	}
 }
@@ -2142,6 +2069,7 @@ void display::invalidate_all()
 {
 	invalidateAll_ = true;
 	invalidated_.clear();
+	update_rect(map_area());
 }
 
 void display::invalidate_unit()
@@ -2155,6 +2083,13 @@ void display::recalculate_minimap()
 		SDL_FreeSurface(minimap_);
 		minimap_ = NULL;
 	}
+
+	redraw_minimap();
+}
+
+void display::redraw_minimap()
+{
+	redrawMinimap_ = true;
 }
 
 void display::invalidate_game_status()
@@ -2162,19 +2097,48 @@ void display::invalidate_game_status()
 	invalidateGameStatus_ = true;
 }
 
-void display::add_overlay(const gamemap::location& loc, const std::string& img)
+void display::add_overlay(const gamemap::location& loc, const std::string& img, const std::string& halo)
 {
 	overlays_.insert(std::pair<gamemap::location,std::string>(loc,img));
+	halo_overlays_.insert(std::pair<gamemap::location,int>(loc,halo::add(get_location_x(loc)+hex_size()/2,get_location_y(loc)+hex_size()/2,halo)));
 }
 
 void display::remove_overlay(const gamemap::location& loc)
 {
 	overlays_.erase(loc);
+	typedef std::multimap<gamemap::location,int>::const_iterator Itor;
+	std::pair<Itor,Itor> itors = halo_overlays_.equal_range(loc);
+	while(itors.first != itors.second) {
+		halo::remove(itors.first->second);
+		++itors.first;
+	}
+
+	halo_overlays_.erase(loc);
 }
 
-void display::set_team(int team)
+void display::write_overlays(config& cfg) const
 {
+	for(std::multimap<gamemap::location,std::string>::const_iterator i = overlays_.begin();
+	    i != overlays_.end(); ++i) {
+		config& item = cfg.add_child("item");
+		i->first.write(item);
+		item["image"] = i->second;
+	}
+}
+
+void display::set_team(size_t team)
+{
+	assert(team < teams_.size());
 	currentTeam_ = team;
+
+	labels().recalculate_shroud();
+}
+
+void display::set_playing_team(size_t team)
+{
+	assert(team < teams_.size());
+	activeTeam_ = team;
+	invalidate_game_status();
 }
 
 void display::set_advancing_unit(const gamemap::location& loc, double amount)
@@ -2200,7 +2164,7 @@ bool display::update_locked() const
 bool display::turbo() const
 {
 	bool res = turbo_;
-	if(keys_[KEY_LSHIFT] || keys_[KEY_RSHIFT])
+	if(keys_[SDLK_LSHIFT] || keys_[SDLK_RSHIFT])
 		res = !res;
 
 	return res;
@@ -2225,4 +2189,225 @@ void display::debug_highlight(const gamemap::location& loc, double amount)
 void display::clear_debug_highlights()
 {
 	debugHighlights_.clear();
+}
+
+bool display::shrouded(int x, int y) const
+{
+	if(team_valid())
+		return teams_[currentTeam_].shrouded(x,y);
+	else
+		return false;
+}
+
+bool display::fogged(int x, int y) const
+{
+	if(team_valid())
+		return teams_[currentTeam_].fogged(x,y);
+	else
+		return false;
+}
+
+bool display::team_valid() const
+{
+	return currentTeam_ < teams_.size();
+}
+
+size_t display::viewing_team() const
+{
+	return currentTeam_;
+}
+
+size_t display::playing_team() const
+{
+	return activeTeam_;
+}
+
+const theme& display::get_theme() const
+{
+	return theme_;
+}
+
+const theme::menu* display::menu_pressed(int mousex, int mousey, bool button_pressed)
+{
+
+	for(std::vector<gui::button>::iterator i = buttons_.begin(); i != buttons_.end(); ++i) {
+		if(i->process(mousex,mousey,button_pressed)) {
+			const size_t index = i - buttons_.begin();
+			assert(index < theme_.menus().size());
+			return &theme_.menus()[index];
+		}
+	}
+
+	return NULL;
+}
+
+void display::begin_game()
+{
+	in_game_ = true;
+	create_buttons();
+}
+
+int display::set_help_string(const std::string& str)
+{
+	font::remove_floating_label(help_string_);
+
+	const SDL_Color colour = {0x0,0x00,0x00,0x77};
+	help_string_ = font::add_floating_label(str,18,font::NORMAL_COLOUR,x()/2,y(),0.0,0.0,-1,screen_area(),font::CENTER_ALIGN,&colour,5);
+	const SDL_Rect& rect = font::get_floating_label_rect(help_string_);
+	font::move_floating_label(help_string_,0.0,-double(rect.h));
+	return help_string_;
+}
+
+void display::clear_help_string(int handle)
+{
+	if(handle == help_string_) {
+		font::remove_floating_label(handle);
+		help_string_ = 0;
+	}
+}
+
+void display::clear_all_help_strings()
+{
+	clear_help_string(help_string_);
+}
+
+void display::create_buttons()
+{
+	buttons_.clear();
+
+	const std::vector<theme::menu>& buttons = theme_.menus();
+	for(std::vector<theme::menu>::const_iterator i = buttons.begin(); i != buttons.end(); ++i) {
+		gui::button b(*this,i->title(),gui::button::TYPE_PRESS,i->image());
+		const SDL_Rect& loc = i->location(screen_area());
+		b.set_location(loc.x,loc.y);
+
+		if(rects_overlap(b.location(),map_area())) {
+			b.set_volatile(true);
+		}
+
+		buttons_.push_back(b);
+	}
+}
+
+void display::add_observer(const std::string& name)
+{
+	observers_.insert(name);
+}
+
+void display::remove_observer(const std::string& name)
+{
+	observers_.erase(name);
+}
+
+namespace {
+	const int max_chat_messages = 6;
+	const int chat_message_border = 5;
+	const int chat_message_x = 10;
+	const int chat_message_y = 10;
+	const SDL_Color chat_message_colour = {200,200,200,200};
+	const SDL_Color chat_message_bg     = {0,0,0,100};
+}
+
+void display::add_chat_message(const std::string& speaker, int side, const std::string& message, display::MESSAGE_TYPE type)
+{
+	std::string msg = message;
+	gui::text_to_lines(msg,80);
+
+	int ypos = chat_message_x;
+	for(std::vector<chat_message>::const_iterator m = chat_messages_.begin(); m != chat_messages_.end(); ++m) {
+		ypos += font::get_floating_label_rect(m->handle).h;
+	}
+
+	std::stringstream str;
+	if(type == MESSAGE_PUBLIC) {
+		str << "<" << speaker << ">";
+	} else {
+		str << font::NULL_MARKUP << "*" << speaker << "*";
+	}
+
+	std::stringstream message_str;
+	message_str << font::NULL_MARKUP << msg;
+
+	SDL_Color speaker_colour = {255,255,255,255};
+	if(side >= 1) {
+		speaker_colour = team::get_side_colour(side);
+	}
+
+	const SDL_Rect rect = map_area();
+	const int speaker_handle = font::add_floating_label(str.str(),12,speaker_colour,
+	                                                   rect.x+chat_message_x,rect.y+ypos,
+													   0,0,-1,rect,font::LEFT_ALIGN,&chat_message_bg,chat_message_border);
+
+	const int message_handle = font::add_floating_label(message_str.str(),12,chat_message_colour,
+		rect.x + chat_message_x + font::get_floating_label_rect(speaker_handle).w,rect.y+ypos,
+		0,0,-1,rect,font::LEFT_ALIGN,&chat_message_bg,chat_message_border);
+
+	chat_messages_.push_back(chat_message(speaker_handle,message_handle));
+
+	prune_chat_messages();
+}
+
+void display::prune_chat_messages(bool remove_all)
+{
+	const int message_ttl = remove_all ? 0 : 1200000;
+	if(chat_messages_.empty() == false && (chat_messages_.front().created_at+message_ttl < SDL_GetTicks() || chat_messages_.size() > max_chat_messages)) {
+		const int movement = font::get_floating_label_rect(chat_messages_.front().handle).h;
+
+		font::remove_floating_label(chat_messages_.front().speaker_handle);
+		font::remove_floating_label(chat_messages_.front().handle);
+		chat_messages_.erase(chat_messages_.begin());
+
+		for(std::vector<chat_message>::const_iterator i = chat_messages_.begin(); i != chat_messages_.end(); ++i) {
+			font::move_floating_label(i->speaker_handle,0,-movement);
+			font::move_floating_label(i->handle,0,-movement);
+		}
+
+		prune_chat_messages(remove_all);
+	}
+}
+
+void display::set_diagnostic(const std::string& msg)
+{
+	if(diagnostic_label_ != 0) {
+		font::remove_floating_label(diagnostic_label_);
+		diagnostic_label_ = 0;
+	}
+
+	if(msg != "") {
+		diagnostic_label_ = font::add_floating_label(msg,16,font::YELLOW_COLOUR,300.0,50.0,0.0,0.0,-1,map_area());
+	}
+}
+
+void display::rebuild_terrain(const gamemap::location &loc) {
+	builder_.rebuild_terrain(loc);
+}
+
+void display::rebuild_all() {
+	builder_.rebuild_all();
+}
+
+void display::add_highlighted_loc(const gamemap::location &hex) {
+	// Only invalidate and insert if this is a new addition, for
+	// efficiency.
+	if (highlighted_locations_.find(hex) == highlighted_locations_.end()) {
+		highlighted_locations_.insert(hex);
+		invalidate(hex);
+	}
+}
+
+void display::clear_highlighted_locs() {
+	for (std::set<gamemap::location>::const_iterator it = highlighted_locations_.begin();
+		 it != highlighted_locations_.end(); it++) {
+		invalidate(*it);
+	}
+	highlighted_locations_.clear();
+}
+
+void display::remove_highlighted_loc(const gamemap::location &hex) {
+	std::set<gamemap::location>::iterator it = highlighted_locations_.find(hex);
+	// Only invalidate and remove if the hex was found, for efficiency.
+	if (it != highlighted_locations_.end()) {
+		highlighted_locations_.erase(it);
+		invalidate(hex);
+	}
 }

@@ -1,4 +1,4 @@
-/* $Id: pathfind.cpp 83 2003-09-24 10:10:13Z Sirp $ */
+/* $Id: pathfind.cpp,v 1.38 2004/05/07 15:03:47 Sirp Exp $ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net
@@ -22,7 +22,7 @@ namespace {
 gamemap::location find_vacant(const gamemap& map,
                               const std::map<gamemap::location,unit>& units,
 							  const gamemap::location& loc, int depth,
-                              gamemap::TERRAIN terrain,
+                              VACANT_TILE_TYPE vacancy,
                               std::set<gamemap::location>& touched)
 {
 	if(touched.count(loc))
@@ -31,8 +31,7 @@ gamemap::location find_vacant(const gamemap& map,
 	touched.insert(loc);
 
 	if(map.on_board(loc) && units.find(loc) == units.end() &&
-	   map[loc.x][loc.y] != gamemap::TOWER &&
-	   (terrain == 0 || terrain == map[loc.x][loc.y])) {
+	   (vacancy == VACANT_ANY || map.is_castle(loc))) {
 		return loc;
 	} else if(depth == 0) {
 		return gamemap::location();
@@ -40,12 +39,11 @@ gamemap::location find_vacant(const gamemap& map,
 		gamemap::location adj[6];
 		get_adjacent_tiles(loc,adj);
 		for(int i = 0; i != 6; ++i) {
-			if(!map.on_board(adj[i]) ||
-			   terrain != 0 && terrain != map[adj[i].x][adj[i].y])
+			if(!map.on_board(adj[i]) || vacancy == VACANT_CASTLE && !map.is_castle(adj[i]))
 				continue;
 
 			const gamemap::location res =
-			       find_vacant(map,units,adj[i],depth-1,terrain,touched);
+			       find_vacant(map,units,adj[i],depth-1,vacancy,touched);
 
 			if(map.on_board(res))
 				return res;
@@ -60,11 +58,11 @@ gamemap::location find_vacant(const gamemap& map,
 gamemap::location find_vacant_tile(const gamemap& map,
                                 const std::map<gamemap::location,unit>& units,
                                 const gamemap::location& loc,
-                                gamemap::TERRAIN terrain)
+                                VACANT_TILE_TYPE vacancy)
 {
 	for(int i = 1; i != 50; ++i) {
 		std::set<gamemap::location> touch;
-		const gamemap::location res = find_vacant(map,units,loc,i,terrain,touch);
+		const gamemap::location res = find_vacant(map,units,loc,i,vacancy,touch);
 		if(map.on_board(res))
 			return res;
 	}
@@ -78,31 +76,59 @@ void get_adjacent_tiles(const gamemap::location& a, gamemap::location* res)
 	res->y = a.y-1;
 	++res;
 	res->x = a.x+1;
-	res->y = a.y - is_even(a.x);
+	res->y = a.y - (is_even(a.x) ? 1:0);
 	++res;
 	res->x = a.x+1;
-	res->y = a.y + is_odd(a.x);
+	res->y = a.y + (is_odd(a.x) ? 1:0);
 	++res;
 	res->x = a.x;
 	res->y = a.y+1;
 	++res;
 	res->x = a.x-1;
-	res->y = a.y + is_odd(a.x);
+	res->y = a.y + (is_odd(a.x) ? 1:0);
 	++res;
 	res->x = a.x-1;
-	res->y = a.y - is_even(a.x);
+	res->y = a.y - (is_even(a.x) ? 1:0);
+}
+
+namespace {
+
+void get_tiles_radius_internal(const gamemap::location& a, size_t radius, std::set<gamemap::location>& res, std::map<gamemap::location,int>& visited)
+{
+	visited[a] = radius;
+	res.insert(a);
+
+	if(radius == 0) {
+		return;
+	}
+
+	gamemap::location adj[6];
+	get_adjacent_tiles(a,adj);
+	for(size_t i = 0; i != 6; ++i) {
+		if(visited.count(adj[i]) == 0 || visited[adj[i]] < radius-1) {
+			get_tiles_radius_internal(adj[i],radius-1,res,visited);
+		}
+	}
+}
+
+}
+
+void get_tiles_radius(const gamemap::location& a, size_t radius, std::set<gamemap::location>& res)
+{
+	std::map<gamemap::location,int> visited;
+	get_tiles_radius_internal(a,radius,res,visited);
 }
 
 bool tiles_adjacent(const gamemap::location& a, const gamemap::location& b)
 {
 	//two tiles are adjacent if y is different by 1, and x by 0, or if
 	//x is different by 1 and y by 0, or if x and y are each different by 1,
-	//and the x value of the hex with the greater y value is odd
+	//and the x value of the hex with the greater y value is even
 
 	const int xdiff = abs(a.x - b.x);
 	const int ydiff = abs(a.y - b.y);
 	return ydiff == 1 && a.x == b.x || xdiff == 1 && a.y == b.y ||
-	   xdiff == 1 && ydiff == 1 && (a.y > b.y ? (a.x%2) == 1 : (b.x%2) == 1);
+	       xdiff == 1 && ydiff == 1 && (a.y > b.y ? is_even(a.x) : is_even(b.x));
 }
 
 size_t distance_between(const gamemap::location& a, const gamemap::location& b)
@@ -117,18 +143,21 @@ size_t distance_between(const gamemap::location& a, const gamemap::location& b)
 	return hdistance + vdistance - vsavings;
 }
 
-bool enemy_zoc(const gamemap& map,const std::map<gamemap::location,unit>& units,
+bool enemy_zoc(const gamemap& map, const gamestatus& status, 
+					const std::map<gamemap::location,unit>& units,
+					const std::vector<team>& teams,
                const gamemap::location& loc, const team& current_team, int side)
 {
 	gamemap::location locs[6];
 	get_adjacent_tiles(loc,locs);
 	for(int i = 0; i != 6; ++i) {
 		const std::map<gamemap::location,unit>::const_iterator it
-				= units.find(locs[i]);
+				= find_visible_unit(units,locs[i],
+						map,
+						status.get_time_of_day().lawful_bonus,
+						teams,current_team);
 		if(it != units.end() && it->second.side() != side &&
-		   current_team.is_enemy(it->second.side()) &&
-		   !it->second.invisible(map.underlying_terrain(
-		                             map[it->first.x][it->first.y]))) {
+		   current_team.is_enemy(it->second.side()) && !it->second.stone()) {
 			return true;
 		}
 	}
@@ -138,30 +167,37 @@ bool enemy_zoc(const gamemap& map,const std::map<gamemap::location,unit>& units,
 
 namespace {
 
-void find_routes(const gamemap& map, const game_data& gamedata,
+void find_routes(const gamemap& map, const gamestatus& status,
+		       const game_data& gamedata,
 				 const std::map<gamemap::location,unit>& units,
 				 const unit& u,
 				 const gamemap::location& loc,
 				 int move_left,
 				 std::map<gamemap::location,paths::route>& routes,
 				 std::vector<team>& teams,
-				 bool ignore_zocs, bool allow_teleport)
+				 bool ignore_zocs, bool allow_teleport, int turns_left, bool starting_pos)
 {
+	if(size_t(u.side()-1) >= teams.size()) {
+		return;
+	}
+
 	team& current_team = teams[u.side()-1];
 
 	//find adjacent tiles
 	std::vector<gamemap::location> locs(6);
 	get_adjacent_tiles(loc,&locs[0]);
 
-	//check for teleporting units
-	if(allow_teleport && map[loc.x][loc.y] == gamemap::TOWER) {
-		const std::vector<gamemap::location>& towers = map.towers();
+	//check for teleporting units -- we must be on a vacant (or occupied by this unit)
+	//village, that is controlled by our team to be able to teleport.
+	if(allow_teleport && map.is_village(loc) &&
+	   current_team.owns_village(loc) && (starting_pos || units.count(loc) == 0)) {
+		const std::vector<gamemap::location>& villages = map.villages();
 
-		//if we are on a tower, see all friendly towers that we can
+		//if we are on a village, see all friendly villages that we can
 		//teleport to
-		for(std::vector<gamemap::location>::const_iterator t = towers.begin();
-		    t != towers.end(); ++t) {
-			if(!current_team.owns_tower(*t))
+		for(std::vector<gamemap::location>::const_iterator t = villages.begin();
+		    t != villages.end(); ++t) {
+			if(!current_team.owns_village(*t) || units.count(*t))
 				continue;
 
 			locs.push_back(*t);
@@ -179,7 +215,10 @@ void find_routes(const gamemap& map, const game_data& gamedata,
 
 		//see if the tile is on top of an enemy unit
 		const std::map<gamemap::location,unit>::const_iterator unit_it =
-				units.find(locs[i]);
+				find_visible_unit(units,locs[i],map,
+						status.get_time_of_day().lawful_bonus,
+						teams,current_team);
+
 		if(unit_it != units.end() &&
 		   current_team.is_enemy(unit_it->second.side()))
 			continue;
@@ -189,27 +228,39 @@ void find_routes(const gamemap& map, const game_data& gamedata,
 
 		//find the movement cost of this type onto the terrain
 		const int move_cost = u.movement_cost(map,terrain);
-		if(move_cost <= move_left) {
+		if(move_cost <= move_left ||
+		   turns_left > 0 && move_cost <= u.total_movement()) {
+			int new_move_left = move_left - move_cost;
+			int new_turns_left = turns_left;
+			if(new_move_left < 0) {
+				--new_turns_left;
+				new_move_left = u.total_movement() - move_cost;
+			}
+
+			const int total_movement = new_turns_left*u.total_movement() +
+			                           new_move_left;
+
 			const std::map<gamemap::location,paths::route>::const_iterator
 					rtit = routes.find(currentloc);
 
 			//if a better route to that tile has already been found
-			if(rtit != routes.end() &&
-			   rtit->second.move_left >= move_left - move_cost)
+			if(rtit != routes.end() && rtit->second.move_left >= total_movement)
 				continue;
 
-			const bool zoc = enemy_zoc(map,units,currentloc,
-			                           current_team,u.side()) &&
-			                 !ignore_zocs;
+			const bool zoc = !ignore_zocs && enemy_zoc(map,status,units,teams,currentloc,
+			                                           current_team,u.side());
 			paths::route new_route = routes[loc];
 			new_route.steps.push_back(loc);
-			new_route.move_left = zoc ? 0 : move_left - move_cost;
+
+			const int zoc_move_left = zoc ? 0 : new_move_left;
+			new_route.move_left = u.total_movement() * new_turns_left +
+			                      zoc_move_left;
 			routes[currentloc] = new_route;
 
 			if(new_route.move_left > 0) {
-				find_routes(map,gamedata,units,u,currentloc,
-				            new_route.move_left,routes,teams,ignore_zocs,
-							allow_teleport);
+				find_routes(map,status,gamedata,units,u,currentloc,
+				            zoc_move_left,routes,teams,ignore_zocs,
+							allow_teleport,new_turns_left,false);
 			}
 		}
 	}
@@ -217,7 +268,8 @@ void find_routes(const gamemap& map, const game_data& gamedata,
 
 } //end anon namespace
 
-paths::paths(const gamemap& map, const game_data& gamedata,
+paths::paths(const gamemap& map, const gamestatus& status,
+		       const game_data& gamedata,
              const std::map<gamemap::location,unit>& units,
              const gamemap::location& loc,
 			 std::vector<team>& teams,
@@ -230,42 +282,55 @@ paths::paths(const gamemap& map, const game_data& gamedata,
 	}
 
 	routes[loc].move_left = i->second.movement_left();
-	find_routes(map,gamedata,units,i->second,loc,
+	find_routes(map,status,gamedata,units,i->second,loc,
 	            i->second.movement_left(),routes,teams,
-				ignore_zocs,allow_teleport);
+				ignore_zocs,allow_teleport,additional_turns,true);
+}
 
-	if(i->second.can_attack()) {
-		gamemap::location adjacent[6];
-		get_adjacent_tiles(loc,adjacent);
-		for(int j = 0; j != 6; ++j) {
-			const std::map<gamemap::location,unit>::const_iterator enemy =
-					units.find(adjacent[j]);
-			if(enemy != units.end() &&
-			   enemy->second.side() != i->second.side() &&
-			   teams[i->second.side()-1].is_enemy(enemy->second.side())) {
-				route new_route;
-				new_route.move_left = -1;
-				routes.insert(std::pair<gamemap::location,route>(
-										          adjacent[j],new_route));
+int route_turns_to_complete(const unit& u, const gamemap& map,
+                            const paths::route& rt)
+{
+	if(rt.steps.empty())
+		return 0;
+
+	int turns = 0, movement = u.movement_left();
+	for(std::vector<gamemap::location>::const_iterator i = rt.steps.begin()+1;
+	    i != rt.steps.end(); ++i) {
+		assert(map.on_board(*i));
+		const int move_cost = u.movement_cost(map,map[i->x][i->y]);
+		movement -= move_cost;
+		if(movement < 0) {
+			++turns;
+			movement = u.total_movement() - move_cost;
+			if(movement < 0) {
+				return -1;
 			}
 		}
 	}
+
+	return turns;
 }
+
 
 shortest_path_calculator::shortest_path_calculator(const unit& u, const team& t,
                                                    const unit_map& units,
-                                                   const gamemap& map)
-      : unit_(u), team_(t), units_(units), map_(map)
+																	const std::vector<team>& teams,
+                                                   const gamemap& map,
+																	const gamestatus& status)
+      : unit_(u), team_(t), units_(units), teams_(teams), 
+			status_(status), map_(map)
 {
 }
 
-double shortest_path_calculator::cost(const gamemap::location& loc,
-                                      double so_far) const
+double shortest_path_calculator::cost(const gamemap::location& loc, double so_far) const
 {
-	if(!map_.on_board(loc))
+	if(!map_.on_board(loc) || team_.shrouded(loc.x,loc.y))
 		return 100000.0;
 
-	const unit_map::const_iterator enemy_unit = units_.find(loc);
+	const unit_map::const_iterator enemy_unit = find_visible_unit(units_,
+			loc,map_,
+			status_.get_time_of_day().lawful_bonus,teams_,team_);
+
 	if(enemy_unit != units_.end() && team_.is_enemy(enemy_unit->second.side()))
 		return 100000.0;
 
@@ -274,15 +339,18 @@ double shortest_path_calculator::cost(const gamemap::location& loc,
 		get_adjacent_tiles(loc,adj);
 
 		for(size_t i = 0; i != 6; ++i) {
-			const unit_map::const_iterator u = units_.find(adj[i]);
-			if(u != units_.end() && team_.is_enemy(u->second.side())) {
+			const unit_map::const_iterator u = find_visible_unit(units_,
+					adj[i],map_,
+					status_.get_time_of_day().lawful_bonus,teams_,team_);
+
+			if(u != units_.end() && team_.is_enemy(u->second.side()) && !team_.fogged(adj[i].x,adj[i].y) && u->second.stone() == false) {
 				return 100000.0;
 			}
 		}
 	}
 
 	const double base_cost(
-	     unit_.type().movement_type().movement_cost(map_,map_[loc.x][loc.y]));
+	     unit_.movement_cost(map_,map_[loc.x][loc.y]));
 
 	//supposing we had 2 movement left, and wanted to move onto a hex which
 	//takes 3 movement, it's going to cost us 5 movement in total, since we

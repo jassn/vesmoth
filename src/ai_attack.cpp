@@ -1,4 +1,4 @@
-/* $Id: ai_attack.cpp 40 2003-09-19 13:57:37Z Sirp $ */
+/* $Id: ai_attack.cpp,v 1.47 2004/06/26 20:57:48 Sirp Exp $ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net
@@ -10,6 +10,7 @@
 
    See the COPYING file for more details.
 */
+
 #include "actions.hpp"
 #include "ai_attack.hpp"
 #include "game_config.hpp"
@@ -23,26 +24,24 @@
 #include <iostream>
 #include <set>
 
-namespace {
-
 const int max_positions = 10000;
 
-using namespace ai;
-
-void do_analysis(
-                 const gamemap& map,
-                 const location& loc,
-                 const std::multimap<location,location>& srcdst,
-                 const std::multimap<location,location>& dstsrc,
-				 const location* tiles, bool* used_locations,
-                 std::vector<location>& units,
-				 std::map<gamemap::location,unit>& units_map,
-                 std::vector<attack_analysis>& result,
-				 const game_data& data, const gamestatus& status,
-				 attack_analysis& cur_analysis
-                )
+//analyze possibility of attacking target on 'loc'
+void ai::do_attack_analysis(
+	                 const location& loc,
+	                 const move_map& srcdst, const move_map& dstsrc,
+					 const move_map& fullmove_srcdst, const move_map& fullmove_dstsrc,
+	                 const move_map& enemy_srcdst, const move_map& enemy_dstsrc,
+					 const location* tiles, bool* used_locations,
+	                 std::vector<location>& units,
+	                 std::vector<attack_analysis>& result,
+					 attack_analysis& cur_analysis
+	                )
 {
-	if(cur_analysis.movements.size() >= 6)
+	//this function is called fairly frequently, so interact with the user here.
+	user_interact();
+
+	if(cur_analysis.movements.size() > 4)
 		return;
 
 	static double best_results[6];
@@ -52,11 +51,14 @@ void do_analysis(
 		}
 	}
 
-//	if(result.size() > max_positions && !cur_analysis.movements.empty())
-//		return;
+	const size_t max_positions = 1000;
+	if(result.size() > max_positions && !cur_analysis.movements.empty()) {
+		std::cerr << "cut analysis short with number of positions\n";
+		return;
+	}
 
-	const double cur_rating = cur_analysis.movements.empty() ? 0 :
-	                          cur_analysis.rating(0.0);
+	const double cur_rating = cur_analysis.movements.empty() ? -1.0 :
+	                          cur_analysis.rating(current_team().aggression(),*this);
 
 	double rating_to_beat = cur_rating;
 
@@ -68,12 +70,42 @@ void do_analysis(
 
 	for(size_t i = 0; i != units.size(); ++i) {
 		const location current_unit = units[i];
-		units.erase(units.begin() + i);
 
+		const unit_map::const_iterator unit_itor = units_.find(current_unit);
+		assert(unit_itor != units_.end());
+
+		//see if the unit has the backstab ability -- units with backstab
+		//will want to try to have a friendly unit opposite the position they move to
+		//see if the unit has the slow ability -- units with slow only attack first
+		bool backstab = false, slow = false;
+		const std::vector<attack_type>& attacks = unit_itor->second.attacks();
+		for(std::vector<attack_type>::const_iterator a = attacks.begin(); a != attacks.end(); ++a) {
+			if(a->backstab()) {
+				backstab = true;
+			}
+
+			if(a->slow()) {
+				slow = true;
+			}
+		}
+
+		if(slow && cur_analysis.movements.empty() == false) {
+			continue;
+		}
+
+		double best_vulnerability = 0.0, best_support = 0.0;
+		int best_rating = 0;
+		int cur_position = -1;
+
+		//iterate over positions adjacent to the unit, finding the best rated one
 		for(int j = 0; j != 6; ++j) {
-			if(used_locations[j])
-				continue;
 
+			//if in this planned attack, a unit is already in this location
+			if(used_locations[j]) {
+				continue;
+			}
+
+			//see if the current unit can reach that position
 			typedef std::multimap<location,location>::const_iterator Itor;
 			std::pair<Itor,Itor> its = dstsrc.equal_range(tiles[j]);
 			while(its.first != its.second) {
@@ -82,33 +114,91 @@ void do_analysis(
 				++its.first;
 			}
 
-			if(its.first == its.second)
+			//if the unit can't move to this location
+			if(its.first == its.second) {
 				continue;
-
-			cur_analysis.movements.push_back(
-			           std::pair<location,location>(current_unit,tiles[j]));
-
-			cur_analysis.analyze(map,units_map,status,data,50);
-
-			if(cur_analysis.rating(0.0) > rating_to_beat) {
-
-				result.push_back(cur_analysis);
-				used_locations[j] = true;
-				do_analysis(map,loc,srcdst,dstsrc,tiles,used_locations,
-				            units,units_map,result,data,status,cur_analysis);
-				used_locations[j] = false;
 			}
 
-			cur_analysis.movements.pop_back();
-		}
+			//check to see whether this move would be a backstab
+			int backstab_bonus = 1;
+			double surround_bonus = 1.0;
 
-		units.insert(units.begin() + i, current_unit);
+			if(tiles[(j+3)%6] != current_unit) {
+				const unit_map::const_iterator itor = units_.find(tiles[(j+3)%6]);
+
+				//note that we *could* also check if a unit plans to move there before we're
+				//at this stage, but we don't because, since the attack calculations don't
+				//actually take backstab into account (too complicated), this could actually
+				//make our analysis look *worse* instead of better.
+				//so we only check for 'concrete' backstab opportunities.
+				if(itor != units_.end() && itor->second.side() == unit_itor->second.side()) {
+					if(backstab) {
+						backstab_bonus = 2;
+					}
+
+					surround_bonus = 1.2;
+				}
+
+
+			}
+
+			//see if this position is the best rated we've seen so far
+			const int rating = rate_terrain(unit_itor->second,tiles[j]) * backstab_bonus;
+			if(cur_position >= 0 && rating < best_rating) {
+				continue;
+			}
+
+			//find out how vulnerable we are to attack from enemy units in this hex
+			const double vulnerability = power_projection(tiles[j],enemy_srcdst,enemy_dstsrc);
+
+			//calculate how much support we have on this hex from allies. Support does not
+			//take into account terrain, because we don't want to move into a hex that is
+			//surrounded by good defensive terrain
+			const double support = power_projection(tiles[j],fullmove_srcdst,fullmove_dstsrc,false);
+
+			//if this is a position with equal defense to another position, but more vulnerability
+			//then we don't want to use it
+			if(cur_position >= 0 && rating == best_rating && vulnerability/surround_bonus - support*surround_bonus >= best_vulnerability - best_support) {
+				continue;
+			}
+
+			cur_position = j;
+			best_rating = rating;
+			best_vulnerability = vulnerability/surround_bonus;
+			best_support = support*surround_bonus;
+		}
+			
+		if(cur_position != -1) {
+			units.erase(units.begin() + i);
+
+			cur_analysis.movements.push_back(std::pair<location,location>(current_unit,tiles[cur_position]));
+
+			cur_analysis.vulnerability += best_vulnerability;
+
+			cur_analysis.support += best_support;
+
+			cur_analysis.analyze(map_,units_,state_,gameinfo_,50,*this,dstsrc,srcdst,enemy_dstsrc,enemy_srcdst);
+
+			if(cur_analysis.rating(current_team().aggression(),*this) > rating_to_beat) {
+
+				result.push_back(cur_analysis);
+				used_locations[cur_position] = true;
+				do_attack_analysis(loc,srcdst,dstsrc,fullmove_srcdst,fullmove_dstsrc,enemy_srcdst,enemy_dstsrc,
+				                   tiles,used_locations,
+				                   units,result,cur_analysis);
+				used_locations[cur_position] = false;
+			}
+
+			cur_analysis.vulnerability -= best_vulnerability;
+			cur_analysis.support -= best_support;
+
+			cur_analysis.movements.pop_back();
+
+			units.insert(units.begin() + i, current_unit);
+		}
 	}
 }
 
-}
-
-namespace ai {
 
 struct battle_type {
 	battle_type(const gamemap::location& a, const gamemap::location& d,
@@ -139,21 +229,18 @@ bool operator==(const battle_type& a, const battle_type& b)
 
 std::set<battle_type> weapon_choice_cache;
 
-int choose_weapon(const gamemap& map, std::map<location,unit>& units,
-                  const gamestatus& status, const game_data& info,
-				  const location& att, const location& def,
-				  battle_stats& cur_stats, gamemap::TERRAIN terrain)
+int ai::choose_weapon(const location& att, const location& def,
+					  battle_stats& cur_stats, gamemap::TERRAIN terrain)
 {
-	const std::map<location,unit>::const_iterator itor = units.find(att);
-	if(itor == units.end())
+	const std::map<location,unit>::const_iterator itor = units_.find(att);
+	if(itor == units_.end())
 		return -1;
 
 	static int cache_hits = 0;
 	static int cache_misses = 0;
 
 	battle_type battle(att,def,terrain);
-	const std::set<battle_type>::const_iterator cache_itor
-	                           = weapon_choice_cache.find(battle);
+	const std::set<battle_type>::const_iterator cache_itor = weapon_choice_cache.find(battle);
 
 	if(cache_itor != weapon_choice_cache.end()) {
 		assert(*cache_itor == battle);
@@ -162,6 +249,8 @@ int choose_weapon(const gamemap& map, std::map<location,unit>& units,
 		cur_stats = cache_itor->stats;
 
 		if(!(size_t(cache_itor->weapon) < itor->second.attacks().size())) {
+			std::cerr << "cached illegal weapon: " << cache_itor->weapon
+			          << "/" << itor->second.attacks().size() << "\n";
 		}
 
 		assert(size_t(cache_itor->weapon) < itor->second.attacks().size());
@@ -179,16 +268,20 @@ int choose_weapon(const gamemap& map, std::map<location,unit>& units,
 	const std::vector<attack_type>& attacks = itor->second.attacks();
 	assert(!attacks.empty());
 
+	const unit_map::const_iterator d_itor = units_.find(def);
+	int d_hitpoints = d_itor->second.hitpoints();
+	int a_hitpoints = itor->second.hitpoints();
+	
 	for(size_t a = 0; a != attacks.size(); ++a) {
-		const battle_stats stats = evaluate_battle_stats(map,att,def,a,units,
-		                                          status,info,terrain,false);
+		const battle_stats stats = evaluate_battle_stats(map_,att,def,a,units_,
+		                                                 state_,gameinfo_,terrain,false);
 
 		//TODO: improve this rating formula!
 		const double rating =
-		   stats.chance_to_hit_defender*stats.damage_defender_takes*
-		                                                 stats.nattacks -
-		   stats.chance_to_hit_attacker*stats.damage_attacker_takes*
-		                                                 stats.ndefends;
+		   (double(stats.chance_to_hit_defender)/100.0)*
+		               minimum<int>(stats.damage_defender_takes,d_hitpoints)*stats.nattacks -
+		   (double(stats.chance_to_hit_attacker)/100.0)*
+		               minimum<int>(stats.damage_attacker_takes,a_hitpoints)*stats.ndefends;
 		if(rating > current_rating || current_choice == -1) {
 			current_choice = a;
 			current_rating = rating;
@@ -205,13 +298,29 @@ int choose_weapon(const gamemap& map, std::map<location,unit>& units,
 	return current_choice;
 }
 
-void attack_analysis::analyze(const gamemap& map,
-                              std::map<location,unit>& units,
-							  const gamestatus& status,
-							  const game_data& info, int num_sims)
+void ai::attack_analysis::analyze(const gamemap& map,
+                                  unit_map& units,
+						 	      const gamestatus& status,
+							      const game_data& info, int num_sims, ai& ai_obj,
+								  const ai::move_map& dstsrc, const ai::move_map& srcdst,
+								  const ai::move_map& enemy_dstsrc, const ai::move_map& enemy_srcdst)
 {
-	const std::map<location,unit>::const_iterator defend_it =units.find(target);
+	const unit_map::const_iterator defend_it = units.find(target);
 	assert(defend_it != units.end());
+
+	//see if the target is a threat to our leader or an ally's leader
+	gamemap::location adj[6];
+	get_adjacent_tiles(target,adj);
+	size_t tile;
+	for(tile = 0; tile != 6; ++tile) {
+		const unit_map::const_iterator leader = units.find(adj[tile]);
+		if(leader != units.end() && leader->second.can_recruit() && ai_obj.current_team().is_enemy(leader->second.side()) == false) {
+			break;
+		}
+	}
+
+	leader_threat = (tile != 6);
+	uses_leader = false;
 
 	target_value = defend_it->second.type().cost();
 	target_value += (double(defend_it->second.experience())/
@@ -238,9 +347,7 @@ void attack_analysis::analyze(const gamemap& map,
 	std::vector<std::pair<location,location> >::const_iterator m;
 	for(m = movements.begin(); m != movements.end(); ++m) {
 		battle_stats bat_stats;
-		const int weapon = choose_weapon(map,units,status,info,
-		                                 m->first,target, bat_stats,
-		                                 map[m->second.x][m->second.y]);
+		const int weapon = ai_obj.choose_weapon(m->first,target, bat_stats, map[m->second.x][m->second.y]);
 
 		assert(weapon != -1);
 		weapons.push_back(weapon);
@@ -253,6 +360,8 @@ void attack_analysis::analyze(const gamemap& map,
 
 		int defenderxp = 0;
 
+		bool defender_slowed = false;
+
 		int defhp = target_hp;
 		for(size_t i = 0; i != movements.size() && defhp; ++i) {
 			const battle_stats& stat = stats[i];
@@ -261,52 +370,58 @@ void attack_analysis::analyze(const gamemap& map,
 			int attacks = stat.nattacks;
 			int defends = stat.ndefends;
 
-			std::map<location,unit>::const_iterator att
-			               = units.find(movements[i].first);
+			if(defender_slowed && defends > 1) {
+				--defends;
+
+				//give an extra bonus based on slowing here
+				avg_damage_taken -= stat.damage_defender_takes;
+			}
+
+			unit_map::const_iterator att = units.find(movements[i].first);
 			double cost = att->second.type().cost();
+
+			if(att->second.can_recruit()) {
+				uses_leader = true;
+			}
+
+			const bool on_village = map.is_village(movements[i].second);
 
 			//up to double the value of a unit based on experience
 			cost += (double(att->second.experience())/
 			         double(att->second.max_experience()))*cost;
 
-			terrain_quality += stat.chance_to_hit_attacker*cost;
+			terrain_quality += (double(stat.chance_to_hit_attacker)/100.0)*cost * (on_village ? 0.5 : 1.0);
 			resources_used += cost;
 
+			bool defender_strikes_first = stat.defender_strikes_first;
+
 			while(attacks || defends) {
-				if(attacks) {
-					const double roll = double(rand()%1000)/1000.0;
+				if(attacks && !defender_strikes_first) {
+					const int roll = rand()%100;
 					if(roll < stat.chance_to_hit_defender) {
 						defhp -= stat.damage_defender_takes;
 						if(defhp <= 0) {
-
-							//the reward for advancing a unit is to
-							//get a 'negative' loss of that unit
-							const int xp = defend_it->second.type().level()*10;
-							if(xp >= att->second.max_experience() -
-							         att->second.experience()) {
-								avg_losses -= att->second.type().cost();
-							}
-
-							//the reward for killing with a unit that
-							//plagues is to get a 'negative' loss of that unit
-							if(stat.attacker_plague) {
-								avg_losses -= att->second.type().cost();
-							}
-
 							defhp = 0;
 							break;
 						}
 
 						atthp += stat.amount_attacker_drains;
-						if(atthp > hitpoints[i])
+						if(atthp > hitpoints[i]) {
 							atthp = hitpoints[i];
+						}
+
+						if(stat.attacker_slows && !defender_slowed && defend_it->second.has_flag("slowed") == false) {
+							defender_slowed = true;
+						}
 					}
 
 					--attacks;
 				}
 
+				defender_strikes_first = false;
+
 				if(defends) {
-					const double roll = double(rand()%1000)/1000.0;
+					const int roll = rand()%100;
 					if(roll < stat.chance_to_hit_attacker) {
 						atthp -= stat.damage_attacker_takes;
 						if(atthp <= 0) {
@@ -320,39 +435,66 @@ void attack_analysis::analyze(const gamemap& map,
 						}
 
 						defhp += stat.amount_defender_drains;
-						if(defhp > target_max_hp)
+						if(defhp > target_max_hp) {
 							defhp = target_max_hp;
+						}
 					}
 
 					--defends;
 				}
 			}
 
+			const int xp = defend_it->second.type().level() * (defhp <= 0 ? game_config::kill_experience : 1);
+
+			const int xp_for_advance = att->second.max_experience() - att->second.experience();
+
+			//the reward for advancing a unit is to get a 'negative' loss of that unit
+			if(xp >= xp_for_advance) {
+				avg_losses -= att->second.type().cost();
+
+				//ignore any damage done to this unit
+				atthp = hitpoints[i];
+			} else {
+				//the reward for getting a unit closer to advancement is to get
+				//the proportion of remaining experience needed, and multiply
+				//it by a quarter of the unit cost. This will cause the AI
+				//to heavily favor getting xp for close-to-advance units.
+				avg_losses -= (att->second.type().cost()*xp)/(xp_for_advance*4);
+			}
+
 			if(defhp <= 0) {
+				//the reward for killing with a unit that
+				//plagues is to get a 'negative' loss of that unit
+				if(stat.attacker_plague) {
+					avg_losses -= att->second.type().cost();
+				}
+
 				break;
 			} else if(atthp == 0) {
 				avg_losses += cost;
-			} else if(map[movements[i].second.x][movements[i].second.y] ==
-			          gamemap::TOWER) {
-				atthp += game_config::heal_amount;
-				if(atthp > hitpoints[i])
-					atthp = hitpoints[i];
+			}
+			
+			//if the attacker moved onto a village, reward it for doing so
+			else if(on_village) {
+				atthp += game_config::cure_amount*2; //double reward to emphasize getting onto villages
 			}
 
-			defenderxp += (atthp == 0 ? 10:1)*att->second.type().level();
+			defenderxp += (atthp == 0 ? game_config::kill_experience:1)*att->second.type().level();
 
 			avg_damage_taken += hitpoints[i] - atthp;
 		}
 
-		//penalty for allowing advancement is a 'negative' kill
-		if(defend_it->second.experience() < defend_it->second.max_experience()&&
+		//penalty for allowing advancement is a 'negative' kill, and
+		//defender's hitpoints get restored to maximum
+		if(defend_it->second.experience() < defend_it->second.max_experience() &&
 		   defend_it->second.experience() + defenderxp >=
 		   defend_it->second.max_experience()) {
 			chance_to_kill -= 1.0;
+			defhp = defend_it->second.hitpoints();
 		} else if(defhp == 0) {
 			chance_to_kill += 1.0;
-		} else if(map[defend_it->first.x][defend_it->first.y]==gamemap::TOWER) {
-			defhp += game_config::heal_amount;
+		} else if(map.is_village(defend_it->first)) {
+			defhp += game_config::cure_amount;
 			if(defhp > target_hp)
 				defhp = target_hp;
 		}
@@ -360,35 +502,100 @@ void attack_analysis::analyze(const gamemap& map,
 		avg_damage_inflicted += target_hp - defhp;
 	}
 
+	//calculate the 'alternative_terrain_quality' -- the best possible defensive values
+	//the attacking units could hope to achieve if they didn't attack and moved somewhere.
+	//this is could for comparative purposes to see just how vulnerable the AI is
+	//making itself
+
+	alternative_terrain_quality = 0.0;
+	double cost_sum = 0.0;
+	for(size_t i = 0; i != movements.size(); ++i) {
+		const unit_map::const_iterator att = units.find(movements[i].first);
+		const double cost = att->second.type().cost();
+		cost_sum += cost;
+		alternative_terrain_quality += cost*ai_obj.best_defensive_position(att->first,dstsrc,srcdst,enemy_dstsrc,enemy_srcdst).chance_to_hit;
+	}
+
+	alternative_terrain_quality /= cost_sum*100;
+
 	chance_to_kill /= num_sims;
 	avg_damage_inflicted /= num_sims;
 	avg_damage_taken /= num_sims;
 	terrain_quality /= resources_used;
 	resources_used /= num_sims;
 	avg_losses /= num_sims;
+
+	if(uses_leader) {
+		leader_threat = false;
+	}
 }
 
-double attack_analysis::rating(double aggression) const
+double ai::attack_analysis::rating(double aggression, ai& ai_obj) const
 {
-	double value = chance_to_kill*target_value - avg_losses;
+	if(leader_threat) {
+		aggression = 1.0;
+	}
 
+	//only use the leader if we do a serious amount of damage
+	//compared to how much they do to us.
+	if(uses_leader && aggression > -4.0) {
+		std::cerr << "uses leader..\n";
+		aggression = -4.0;
+	}
+
+	double value = chance_to_kill*target_value - avg_losses*(1.0-aggression);
+
+	if(terrain_quality > alternative_terrain_quality) {
+		//this situation looks like it might be a bad move: we are moving our attackers out
+		//of their optimal terrain into sub-optimal terrain.
+		//calculate the 'exposure' of our units to risk
+
+		const double exposure_mod = uses_leader ? 2.0 : ai_obj.current_team().caution();
+		const double exposure = exposure_mod*resources_used*(terrain_quality - alternative_terrain_quality)*vulnerability/maximum<double>(0.01,support);
+		std::cerr << "attack option has base value " << value << " with exposure " << exposure << ": " << vulnerability << "/" << support << " = " << (vulnerability/support) << "\n";
+		if(uses_leader) {
+			ai_obj.log_message("attack option has value " + str_cast(value) + " with exposure " + str_cast(exposure) + ": " + str_cast(vulnerability) + "/" + str_cast(support));
+		}
+
+		value -= exposure*(1.0-aggression);
+	}
+
+	//if this attack uses our leader, and the leader can reach the keep, and has gold to spend, reduce
+	//the value to reflect the leader's lost recruitment opportunity in the case of an attack
+	if(uses_leader && ai_obj.leader_can_reach_keep() && ai_obj.current_team().gold() > 20) {
+		value -= double(ai_obj.current_team().gold())*0.5;
+	}
+	
 	//prefer to attack already damaged targets
-	value += ((target_starting_damage/3 + avg_damage_inflicted)*
-					                     (target_value/resources_used) -
-	   (1.0-aggression)*avg_damage_taken*(resources_used/target_value))/10.0;
+	value += ((target_starting_damage/3 + avg_damage_inflicted) - (1.0-aggression)*avg_damage_taken)/10.0;
+
+	//sanity check: if we're putting ourselves at major risk, and have no chance to kill, and we're not
+	//aiding our allies who are also attacking, then don't do it
+	if(vulnerability > 50.0 && vulnerability > support*2.0 && chance_to_kill < 0.02 && aggression < 0.75 && !ai_obj.attack_close(target)) {
+		return -1.0;
+	}
+
+	if(!leader_threat && vulnerability*terrain_quality > 0.0) {
+		value *= support/(vulnerability*terrain_quality);
+	}
+
 	value /= ((resources_used/2) + (resources_used/2)*terrain_quality);
+
+	if(leader_threat) {
+		value *= 5.0;
+	}
+
+	std::cerr << "attack on " << (target.x+1) << "," << (target.y+1) << ": attackers: " << movements.size() << " value: " << value
+	          << " chance to kill: " << chance_to_kill << " damage inflicted: " << avg_damage_inflicted << " damage taken: " << avg_damage_taken
+		      << " vulnerability: " << vulnerability << " support: " << support << " quality: " << terrain_quality << " alternative quality: " << alternative_terrain_quality << "\n";
 
 	return value;
 }
 
-std::vector<attack_analysis> analyze_targets(
-             const gamemap& map,
-             const std::multimap<location,location>& srcdst,
-			 const std::multimap<location,location>& dstsrc,
-			 std::map<location,unit>& units,
-			 const team& current_team, int team_num,
-			 const gamestatus& status, const game_data& data
-            )
+std::vector<ai::attack_analysis> ai::analyze_targets(
+	             const move_map& srcdst, const move_map& dstsrc,
+	             const move_map& enemy_srcdst, const move_map& enemy_dstsrc
+                )
 {
 	log_scope("analyzing targets...");
 
@@ -397,9 +604,8 @@ std::vector<attack_analysis> analyze_targets(
 	std::vector<attack_analysis> res;
 
 	std::vector<location> unit_locs;
-	for(std::map<location,unit>::const_iterator i = units.begin();
-	    i != units.end(); ++i) {
-		if(i->second.side() == team_num) {
+	for(unit_map::const_iterator i = units_.begin(); i != units_.end(); ++i) {
+		if(i->second.side() == team_num_) {
 			unit_locs.push_back(i->first);
 		}
 	}
@@ -407,33 +613,145 @@ std::vector<attack_analysis> analyze_targets(
 	bool used_locations[6];
 	std::fill(used_locations,used_locations+6,false);
 
-	for(std::map<location,unit>::const_iterator j = units.begin();
-	    j != units.end(); ++j) {
+	std::map<location,paths> dummy_moves;
+	move_map fullmove_srcdst, fullmove_dstsrc;
+	calculate_possible_moves(dummy_moves,fullmove_srcdst,fullmove_dstsrc,false,true);
 
-		//attack anyone who is on the enemy side, and who is not invisible
-		if(current_team.is_enemy(j->second.side()) &&
-		   j->second.invisible(map.underlying_terrain(
-		                         map[j->first.x][j->first.y])) == false) {
+	for(unit_map::const_iterator j = units_.begin(); j != units_.end(); ++j) {
+
+		//attack anyone who is on the enemy side, and who is not invisible or turned to stone
+		if(current_team().is_enemy(j->second.side()) && j->second.stone() == false &&
+		   j->second.invisible(map_.underlying_terrain(map_[j->first.x][j->first.y]), 
+				state_.get_time_of_day().lawful_bonus,j->first,
+				units_,teams_) == false) {
 			location adjacent[6];
 			get_adjacent_tiles(j->first,adjacent);
 			attack_analysis analysis;
 			analysis.target = j->first;
+			analysis.vulnerability = 0.0;
+			analysis.support = 0.0;
 
 			const int ticks = SDL_GetTicks();
 
-			do_analysis(map,j->first,srcdst,dstsrc,adjacent,used_locations,
-			            unit_locs,units,res,data,status,analysis);
+			do_attack_analysis(j->first,srcdst,dstsrc,fullmove_srcdst,fullmove_dstsrc,enemy_srcdst,enemy_dstsrc,
+			            adjacent,used_locations,unit_locs,res,analysis);
 
 			const int time_taken = SDL_GetTicks() - ticks;
 			static int max_time = 0;
 			if(time_taken > max_time)
 				max_time = time_taken;
-
-			std::cerr << "do_analysis took " << time_taken << " (" << max_time << ")\n";
 		}
 	}
 
 	return res;
 }
 
+double ai::power_projection(const gamemap::location& loc, const move_map& srcdst, const move_map& dstsrc, bool use_terrain) const
+{
+	static gamemap::location used_locs[6];
+	static double ratings[6];
+	int num_used_locs = 0;
+
+	static gamemap::location locs[6];
+	get_adjacent_tiles(loc,locs);
+
+	const int lawful_bonus = state_.get_time_of_day().lawful_bonus;
+
+	double res = 0.0;
+
+	for(int i = 0; i != 6; ++i) {
+		if(map_.on_board(locs[i]) == false) {
+			continue;
+		}
+
+		const gamemap::TERRAIN terrain = map_[locs[i].x][locs[i].y];
+
+		typedef move_map::const_iterator Itor;
+		typedef std::pair<Itor,Itor> Range;
+		Range its = dstsrc.equal_range(locs[i]);
+		
+		gamemap::location* const beg_used = used_locs;
+		gamemap::location* end_used = used_locs + num_used_locs;
+
+		double best_rating = 0.0;
+		gamemap::location best_unit;
+
+		for(int n = 0; n != 2; ++n) {
+			for(Itor it = its.first; it != its.second; ++it) {
+				if(std::find(beg_used,end_used,it->second) != end_used) {
+					continue;
+				}
+
+				const unit_map::const_iterator u = units_.find(it->second);
+
+				//unit might have been killed, and no longer exist
+				if(u == units_.end()) {
+					continue;
+				}
+
+				const unit& un = u->second;
+
+				int tod_modifier = 0;
+				if(un.type().alignment() == unit_type::LAWFUL) {
+					tod_modifier = lawful_bonus;
+				} else if(un.type().alignment() == unit_type::CHAOTIC) {
+					tod_modifier = -lawful_bonus;
+				}
+	
+				const double hp = double(un.hitpoints())/
+				                  double(un.max_hitpoints());
+				int most_damage = 0;
+				for(std::vector<attack_type>::const_iterator att =
+				    un.attacks().begin(); att != un.attacks().end(); ++att) {
+					const int damage = (att->damage()*att->num_attacks()*(100+tod_modifier))/100;
+					if(damage > most_damage) {
+						most_damage = damage;
+					}
+				}
+
+				const bool village = map_.is_village(terrain);
+				const double village_bonus = (use_terrain && village) ? 1.5 : 1.0;
+
+				const double defense = use_terrain ? double(100 - un.defense_modifier(map_,terrain))/100.0 : 0.5;
+				const double rating = village_bonus*hp*defense*double(most_damage);
+				if(rating > best_rating) {
+					best_rating = rating;
+					best_unit = it->second;
+				}
+			}
+
+			//if this is the second time through, then we are looking at a unit
+			//that has already been used, but for whom we may have found
+			//a better position to attack from
+			if(n == 1 && best_unit.valid()) {
+				end_used = beg_used + num_used_locs;
+				gamemap::location* const pos = std::find(beg_used,end_used,best_unit);
+				const int index = pos - beg_used;
+				if(best_rating >= ratings[index]) {
+					res -= ratings[index];
+					res += best_rating;
+					used_locs[index] = best_unit;
+					ratings[index] = best_rating;
+				}
+
+				best_unit = gamemap::location();
+				break;
+			}
+
+			if(best_unit.valid()) {
+				break;
+			}
+
+			end_used = beg_used;
+		}
+
+		if(best_unit.valid()) {
+			used_locs[num_used_locs] = best_unit;
+			ratings[num_used_locs] = best_rating;
+			++num_used_locs;
+			res += best_rating;
+		}
+	}
+
+	return res;
 }
