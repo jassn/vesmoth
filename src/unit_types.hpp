@@ -105,7 +105,7 @@ public:
 	const std::map<std::string,std::string>& damage_table() const;
 
 private:
-	mutable config& cfg_;
+	config& cfg_;
 
 	mutable std::map<gamemap::TERRAIN,int> moveCosts_;
 	mutable std::map<gamemap::TERRAIN,double> defenseMods_;
@@ -169,7 +169,7 @@ public:
 	const std::vector<config*>& possible_traits() const;
 
 private:
-	mutable config& cfg_;
+	config& cfg_;
 
 	double alpha_;
 

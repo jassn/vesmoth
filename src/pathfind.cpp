@@ -105,6 +105,18 @@ bool tiles_adjacent(const gamemap::location& a, const gamemap::location& b)
 	   xdiff == 1 && ydiff == 1 && (a.y > b.y ? (a.x%2) == 1 : (b.x%2) == 1);
 }
 
+size_t distance_between(const gamemap::location& a, const gamemap::location& b)
+{
+	const size_t hdistance = abs(a.x - b.x);
+
+	const size_t vpenalty = (is_even(a.x) && is_odd(b.x) && a.y < b.y ||
+	                         is_even(b.x) && is_odd(a.x) && b.y < a.y) ? 1:0;
+	const size_t vdistance = abs(a.y - b.y) + vpenalty;
+	const size_t vsavings = minimum<int>(vdistance,hdistance/2 + hdistance%2);
+
+	return hdistance + vdistance - vsavings;
+}
+
 bool enemy_zoc(const gamemap& map,const std::map<gamemap::location,unit>& units,
                const gamemap::location& loc, const team& current_team, int side)
 {
@@ -209,7 +221,7 @@ paths::paths(const gamemap& map, const game_data& gamedata,
              const std::map<gamemap::location,unit>& units,
              const gamemap::location& loc,
 			 std::vector<team>& teams,
-			 bool ignore_zocs, bool allow_teleport)
+			 bool ignore_zocs, bool allow_teleport, int additional_turns)
 {
 	const std::map<gamemap::location,unit>::const_iterator i = units.find(loc);
 	if(i == units.end()) {
