@@ -1,0 +1,22 @@
+[unit]
+name=Blood Bat
+image=undead-bloodbat.png
+hitpoints=26
+movement_type=undeadfly
+movement=9
+experience=500
+level=1
+alignment=chaotic
+advanceto=null
+cost=24
+usage=scout
+unit_description="The fur of this undead flying beast is tainted red by the blood of its victims. The Blood Bat is fast, and can drain the blood of those it attacks, thus healing itself." 
+	[attack]
+	name=fangs
+	type=blade
+	range=short
+	damage=6
+	number=3
+	special=drain
+	[/attack]
+[/unit]

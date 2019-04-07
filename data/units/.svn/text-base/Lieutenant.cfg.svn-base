@@ -1,0 +1,29 @@
+[unit]
+name=Lieutenant
+image=human-lieutenant.png
+hitpoints=48
+movement_type=smallfoot
+movement=6
+experience=80
+level=2
+alignment=neutral
+advanceto=general
+cost=35
+ability=leadership
+usage=fighter
+unit_description="Able at swords and crossbows, the lieutenant leads small groups of human soldiers, coordinating their attacks and increasing the fighting ability of those of lower rank around him."
+	[attack]
+	name=sword
+	type=blade
+	range=short
+	damage=6
+	number=3
+	[/attack]
+	[attack]
+	name=crossbow
+	type=pierce
+	range=long
+	damage=5
+	number=3
+	[/attack]
+[/unit]

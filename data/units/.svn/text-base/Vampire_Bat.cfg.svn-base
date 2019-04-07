@@ -1,0 +1,22 @@
+[unit]
+name=Vampire Bat
+image=undead-bat.png
+hitpoints=18
+movement_type=undeadfly
+movement=8
+experience=30
+level=0
+alignment=chaotic
+advanceto=Blood Bat
+cost=15
+usage=scout
+unit_description="An undead flying beast, it attacks by biting its target. While the Vampire Bat fangs are not very powerful, they drain the blood of the victim, giving some of its health to the monster."
+	[attack]
+	name=fangs
+	type=blade
+	range=short
+	damage=3
+	number=3
+	special=drain
+	[/attack]
+[/unit]

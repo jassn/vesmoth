@@ -1,0 +1,39 @@
+Index: game.cpp
+===================================================================
+--- game.cpp	(revision 56598)
++++ game.cpp	(working copy)
+@@ -134,9 +134,9 @@
+ 			if(should_save == 0) {
+ 				save_game(state);
+ 			}
+-		}
+-	}
++		} // END try
+ 
++	} // END for loop
+ 	return VICTORY;
+ }
+ 
+@@ -413,14 +413,21 @@
+ 			  string_table["end_game_message"],
+ 			  gui::OK_ONLY);
+ 		}
+-	}
+ 
++
++	} // for loop
++
++
++
+ 	return 0;
+ }
+ 
++extern int main_jsn(int argc, char *argv[]);
++
+ int main(int argc, char** argv)
+ {
+ 	try {
++        //main_jsn(argc, argv);
+ 		return play_game(argc,argv);
+ 	} catch(CVideo::error&) {
+ 		std::cerr << "Could not initialize video. Exiting.\n";

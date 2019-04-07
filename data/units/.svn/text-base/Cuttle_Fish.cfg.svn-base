@@ -1,0 +1,29 @@
+[unit]
+name=Cuttle Fish
+image=cuttlefish.png
+hitpoints=52
+movement_type=swimmer
+movement=8
+experience=500
+level=2
+alignment=neutral
+advanceto=null
+cost=28
+usage=fighter
+unit_description="Cuttle Fish are giantic creatures of the seas. They can grab their opponents with strong tentacles, or spit a poisonous black ink from a distance. The best way to survive an encounter with these monsters is to remain ashore."
+	[attack]
+	name=tentacles
+	type=impact
+	range=short
+	damage=3
+	number=10
+	[/attack]
+	[attack]
+	name=ink
+	type=pierce
+	range=long
+	damage=6
+	number=2
+	special=poison
+	[/attack]
+[/unit]

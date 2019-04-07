@@ -1,0 +1,21 @@
+[unit]
+name=Revenant
+image=undead-revenant.png
+hitpoints=40
+movement_type=undeadfoot
+movement=5
+experience=85
+level=2
+alignment=chaotic
+advanceto=null
+cost=19
+usage=fighter
+unit_description="A Revenant is an undead raised from a once mighty warrior. While the warrior's will and soul are all but lost, the fighting skills certainly remain."
+	[attack]
+	name=axe
+	type=blade
+	range=short
+	damage=8
+	number=4
+	[/attack]
+[/unit]
