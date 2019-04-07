@@ -113,7 +113,8 @@ private:
 	void add_rotated_rules(building_ruleset& rules, const building_rule& tpl, const std::string &rotations);
 	void add_constraint_item(std::vector<std::string> &list, const config& cfg, const std::string &item);
 
-	void terrain_builder::add_images_from_config(imagelist &images, const config &cfg);
+	//void terrain_builder::add_images_from_config(imagelist &images, const config &cfg);
+	void add_images_from_config(imagelist &images, const config &cfg);
 
 	void add_constraints(std::map<gamemap::location, terrain_constraint>& constraints,
 			     const gamemap::location &loc, const std::string& type);
