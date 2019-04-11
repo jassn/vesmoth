@@ -1,4 +1,4 @@
-/* $Id: config.cpp 84 2003-09-24 12:46:52Z Sirp $ */
+/* $Id$ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net

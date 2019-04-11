@@ -1,4 +1,4 @@
-/* $Id: pathfind.hpp 330 2003-10-28 10:09:20Z Sirp $ */
+/* $Id$ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net
@@ -28,8 +28,6 @@
 void get_adjacent_tiles(const gamemap::location& a, gamemap::location* res);
 bool tiles_adjacent(const gamemap::location& a, const gamemap::location& b);
 
-size_t distance_between(const gamemap::location& a, const gamemap::location& b);
-
 gamemap::location find_vacant_tile(const gamemap& map,
                                    const std::map<gamemap::location,unit>& un,
                                    const gamemap::location& loc,
@@ -44,7 +42,7 @@ struct paths
 	paths(const gamemap& map, const game_data& gamedata,
 	      const std::map<gamemap::location,unit>& units,
 	      const gamemap::location& loc, std::vector<team>& teams,
-		  bool ignore_zocs, bool allow_teleport, int additional_turns=0);
+		  bool ignore_zocs, bool allow_teleport);
 
 	struct route
 	{
@@ -56,9 +54,6 @@ struct paths
 	typedef std::map<gamemap::location,route> routes_map;
 	routes_map routes;
 };
-
-int route_turns_to_complete(const unit& u, const gamemap& map,
-                            const paths::route& rt);
 
 struct shortest_path_calculator
 {
@@ -75,39 +70,11 @@ private:
 
 namespace detail {
 struct node {
-	static double heuristic(const gamemap::location& src,
-	                        const gamemap::location& dst) {
-		return distance_between(src,dst);
-	}
-
 	node(const gamemap::location& pos, const gamemap::location& dst,
-	     double cost, node* parent,
-	     const std::set<gamemap::location>* teleports)
-	    : parent(parent), loc(pos), g(cost), h(heuristic(pos,dst))
+	     double cost, node* parent)
+	    : parent(parent), loc(pos), g(cost),
+	      h(sqrt(pow(abs(dst.x-pos.x),2) + pow(abs(dst.y-pos.y),2)))
 	{
-
-		//if there are teleport locations, correct the heuristic to
-		//take them into account
-		if(teleports != NULL) {
-			double srch = h, dsth = h;
-			std::set<gamemap::location>::const_iterator i;
-			for(i = teleports->begin(); i != teleports->end(); ++i) {
-				const double new_srch = heuristic(pos,*i);
-				const double new_dsth = heuristic(*i,dst);
-				if(new_srch < srch) {
-					srch = new_srch;
-				}
-
-				if(new_dsth < dsth) {
-					dsth = new_dsth;
-				}
-			}
-
-			if(srch + dsth + 1.0 < h) {
-				h = srch + dsth + 1.0;
-			}
-		}
-
 		f = g + h;
 	}
 
@@ -128,7 +95,7 @@ paths::route a_star_search(const gamemap::location& src,
 	typedef gamemap::location location;
 	std::list<node> open_list, closed_list;
 
-	open_list.push_back(node(src,dst,0.0,NULL,teleports));
+	open_list.push_back(node(src,dst,0.0,NULL));
 
 	while(!open_list.empty()) {
 
@@ -177,7 +144,7 @@ paths::route a_star_search(const gamemap::location& src,
 			}
 
 			const node nd(locs[j],dst,lowest->g+obj.cost(locs[j],lowest->g),
-			              &*lowest,teleports);
+			              &*lowest);
 
 			for(i = open_list.begin(); i != open_list.end(); ++i) {
 				if(i->loc == nd.loc && i->f <= nd.f) {

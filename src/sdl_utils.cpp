@@ -1,4 +1,4 @@
-/* $Id: sdl_utils.cpp 95 2003-09-26 09:16:42Z Sirp $ */
+/* $Id$ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net

@@ -1,4 +1,4 @@
-/* $Id: config.hpp 81 2003-09-23 10:17:25Z Sirp $ */
+/* $Id$ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net
@@ -52,7 +52,7 @@ struct config
 	          const std::vector<line_source>* lines=0); //throws config::error
 	std::string write() const;
 
-	std::map<std::string,std::string> values;
+	string_map values;
 	std::map<std::string,std::vector<config*> > children;
 
 	static std::vector<std::string> split(const std::string& val);

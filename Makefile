@@ -1,4 +1,4 @@
-## $Id: Makefile 34 2003-09-19 10:56:52Z zas $
+## $Id$
 
 CC=g++
 ifndef CXXFLAGS

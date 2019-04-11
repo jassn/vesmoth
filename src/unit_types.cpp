@@ -1,4 +1,4 @@
-/* $Id: unit_types.cpp 84 2003-09-24 12:46:52Z Sirp $ */
+/* $Id$ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net
@@ -394,6 +394,21 @@ const std::string& unit_type::name() const
 const std::string& unit_type::image() const
 {
 	return cfg_.values["image"];
+}
+
+const std::string& unit_type::image_fighting(attack_type::RANGE range) const
+{
+	static const std::string short_range("image_short");
+	static const std::string long_range("image_long");
+
+	const std::string& str = range == attack_type::LONG_RANGE ?
+	                                  long_range : short_range;
+	const std::string& val = cfg_.values[str];
+
+	if(!val.empty())
+		return val;
+	else
+		return image();
 }
 
 const std::string& unit_type::image_defensive(attack_type::RANGE range) const

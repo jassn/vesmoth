@@ -1,4 +1,4 @@
-/* $Id: dialogs.cpp 93 2003-09-25 11:06:45Z Sirp $ */
+/* $Id$ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net

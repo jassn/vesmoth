@@ -1,4 +1,4 @@
-/* $Id: ai_move.cpp 56 2003-09-20 07:41:15Z Sirp $ */
+/* $Id$ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net
@@ -235,7 +235,7 @@ std::pair<location,location> choose_move(
 	//now see if any other unit can put a better bid forward
 	for(++u; u != units.end(); ++u) {
 		if(u->second.side() != current_team || u->second.can_recruit() ||
-		   u->second.movement_left() <= 0) {
+		   u->second.movement_left() <= 0 || u->second.is_guardian()) {
 			continue;
 		}
 

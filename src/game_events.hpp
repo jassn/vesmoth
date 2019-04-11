@@ -1,4 +1,4 @@
-/* $Id: game_events.hpp 28 2003-09-19 10:21:25Z zas $ */
+/* $Id$ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net
@@ -17,6 +17,7 @@
 #include "display.hpp"
 #include "gamestatus.hpp"
 #include "map.hpp"
+#include "team.hpp"
 #include "unit.hpp"
 #include "unit_types.hpp"
 
@@ -31,7 +32,7 @@ bool conditional_passed(game_state& state_of_game,
 
 struct manager {
 	manager(config& cfg, display& disp, gamemap& map,
-	        std::map<gamemap::location,unit>& units,
+	        std::map<gamemap::location,unit>& units, std::vector<team>& teams,
 		    game_state& state_of_game, game_data& data);
 	~manager();
 };

@@ -1,4 +1,4 @@
-/* $Id: ai_attack.cpp 40 2003-09-19 13:57:37Z Sirp $ */
+/* $Id$ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net

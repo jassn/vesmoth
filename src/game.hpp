@@ -1,4 +1,4 @@
-/* $Id: game.hpp 48 2003-09-19 23:39:03Z Sirp $ */
+/* $Id$ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net

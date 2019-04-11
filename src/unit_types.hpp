@@ -1,4 +1,4 @@
-/* $Id: unit_types.hpp 84 2003-09-24 12:46:52Z Sirp $ */
+/* $Id$ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net
@@ -129,6 +129,7 @@ public:
 	const std::string& name() const;
 	const std::string& image() const;
 	const std::string& image_profile() const;
+	const std::string& image_fighting(attack_type::RANGE range) const;
 	const std::string& image_defensive(attack_type::RANGE range) const;
 	const std::string& unit_description() const;
 	int hitpoints() const;

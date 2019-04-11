@@ -1,4 +1,4 @@
-/* $Id: video.cpp 97 2003-09-26 11:52:42Z Sirp $ */
+/* $Id$ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net
@@ -76,7 +76,7 @@ namespace {
 	}
 }
 
-CVideo::CVideo(const char* text) : frameBuffer(NULL)
+CVideo::CVideo() : frameBuffer(NULL)
 {
 	const int res =
 	       SDL_Init( SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_NOPARACHUTE);
@@ -85,13 +85,9 @@ CVideo::CVideo(const char* text) : frameBuffer(NULL)
 		std::cerr << "Could not initialize SDL: " << SDL_GetError() << "\n";
 		throw CVideo::error();
 	}
-
-	for(int i = 0; i != sizeof(text_); ++i) {
-		text_[i] = text[i];
-	}
 }
 
-CVideo::CVideo( int x, int y, int bits_per_pixel, int flags, const char* text )
+CVideo::CVideo( int x, int y, int bits_per_pixel, int flags)
 		 : frameBuffer(NULL)
 {
 	const int res = SDL_Init( SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_NOPARACHUTE);
@@ -100,10 +96,6 @@ CVideo::CVideo( int x, int y, int bits_per_pixel, int flags, const char* text )
 	}
 
 	setMode( x, y, bits_per_pixel, flags );
-
-	for(int i = 0; i != sizeof(text_); ++i) {
-		text_[i] = text[i];
-	}
 }
 
 CVideo::~CVideo()

@@ -1,4 +1,4 @@
-/* $Id: pathfind.cpp 83 2003-09-24 10:10:13Z Sirp $ */
+/* $Id$ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net
@@ -105,18 +105,6 @@ bool tiles_adjacent(const gamemap::location& a, const gamemap::location& b)
 	   xdiff == 1 && ydiff == 1 && (a.y > b.y ? (a.x%2) == 1 : (b.x%2) == 1);
 }
 
-size_t distance_between(const gamemap::location& a, const gamemap::location& b)
-{
-	const size_t hdistance = abs(a.x - b.x);
-
-	const size_t vpenalty = (is_even(a.x) && is_odd(b.x) && a.y < b.y ||
-	                         is_even(b.x) && is_odd(a.x) && b.y < a.y) ? 1:0;
-	const size_t vdistance = abs(a.y - b.y) + vpenalty;
-	const size_t vsavings = minimum<int>(vdistance,hdistance/2 + hdistance%2);
-
-	return hdistance + vdistance - vsavings;
-}
-
 bool enemy_zoc(const gamemap& map,const std::map<gamemap::location,unit>& units,
                const gamemap::location& loc, const team& current_team, int side)
 {
@@ -221,7 +209,7 @@ paths::paths(const gamemap& map, const game_data& gamedata,
              const std::map<gamemap::location,unit>& units,
              const gamemap::location& loc,
 			 std::vector<team>& teams,
-			 bool ignore_zocs, bool allow_teleport, int additional_turns)
+			 bool ignore_zocs, bool allow_teleport)
 {
 	const std::map<gamemap::location,unit>::const_iterator i = units.find(loc);
 	if(i == units.end()) {
@@ -262,7 +250,7 @@ shortest_path_calculator::shortest_path_calculator(const unit& u, const team& t,
 double shortest_path_calculator::cost(const gamemap::location& loc,
                                       double so_far) const
 {
-	if(!map_.on_board(loc))
+	if(!map_.on_board(loc) || team_.shrouded(loc.x,loc.y))
 		return 100000.0;
 
 	const unit_map::const_iterator enemy_unit = units_.find(loc);

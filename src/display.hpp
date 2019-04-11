@@ -1,4 +1,4 @@
-/* $Id: display.hpp 94 2003-09-26 03:41:08Z Sirp $ */
+/* $Id$ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net
@@ -76,6 +76,7 @@ public:
 	                 int damage, const attack_type& attack);
 	void draw_tile(int x, int y, SDL_Surface* unit_image=NULL,
 	               double alpha=1.0, short blend_to=0);
+	void draw_footstep(const gamemap::location& loc, int xloc, int yloc);
 
 	CVideo& video() { return screen_; }
 
@@ -102,7 +103,7 @@ public:
 	void draw_terrain_palette(int x, int y, gamemap::TERRAIN selected);
 	gamemap::TERRAIN get_terrain_on(int palx, int paly, int x, int y);
 
-	void set_team(int team);
+	void set_team(size_t team);
 
 	void set_advancing_unit(const gamemap::location& loc, double amount);
 
@@ -116,6 +117,8 @@ public:
 
 	static void debug_highlight(const gamemap::location& loc, double amount);
 	static void clear_debug_highlights();
+
+	bool shrouded(int x, int y) const;
 
 private:
 	display(const display&);
@@ -182,6 +185,8 @@ private:
 
 	const gamestatus& status_;
 
+	bool team_valid() const;
+
 	const std::vector<team>& teams_;
 
 	int lastDraw_;
@@ -200,7 +205,7 @@ private:
 	bool sideBarBgDrawn_;
 	int lastTimeOfDay_;
 
-	int currentTeam_;
+	size_t currentTeam_;
 
 	//used to store a unit that is not drawn, because it's currently
 	//being moved or otherwise changed

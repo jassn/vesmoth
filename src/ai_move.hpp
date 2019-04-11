@@ -1,4 +1,4 @@
-/* $Id: ai_move.hpp 28 2003-09-19 10:21:25Z zas $ */
+/* $Id$ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net

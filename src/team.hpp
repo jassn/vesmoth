@@ -1,4 +1,4 @@
-/* $Id: team.hpp 58 2003-09-20 08:10:38Z Sirp $ */
+/* $Id$ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net
@@ -46,6 +46,8 @@ public:
 		double leader_value, village_value;
 
 		std::vector<target> targets;
+
+		bool use_shroud;
 	};
 
 	team(config& cfg, int gold=100);
@@ -74,9 +76,15 @@ public:
 	int villages_per_scout() const;
 
 	std::vector<target>& targets();
+
+	bool uses_shroud() const;
+	bool shrouded(size_t x, size_t y) const;
+	void clear_shroud(size_t x, size_t y);
 private:
 	int gold_;
 	std::set<gamemap::location> towers_;
+
+	std::vector<std::vector<bool> > shroud_;
 
 	team_info info_;
 };

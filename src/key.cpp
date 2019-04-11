@@ -1,4 +1,4 @@
-/* $Id: key.cpp 59 2003-09-20 10:43:17Z Sirp $ */
+/* $Id$ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net

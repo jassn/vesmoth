@@ -1,4 +1,4 @@
-/* $Id: replay.cpp 118 2003-09-30 09:25:06Z  $ */
+/* $Id$ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net
@@ -414,6 +414,8 @@ bool do_replay(display& disp, const gamemap& map, const game_data& gameinfo,
 			}
 
 			game_events::fire("moveto",dst);
+
+			clear_shroud(disp,map,gameinfo,units,teams,team_num-1);
 		}
 
 		else if((it = cfg->children.find("attack")) != cfg->children.end()) {
@@ -480,4 +482,6 @@ bool do_replay(display& disp, const gamemap& map, const game_data& gameinfo,
 			throw replay::error();
 		}
 	}
+
+	return false; /* Never attained, but silent a gcc warning. --Zas */
 }

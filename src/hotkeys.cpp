@@ -1,4 +1,4 @@
-/* $Id: hotkeys.cpp 73 2003-09-21 09:59:43Z Sirp $ */
+/* $Id$ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net
@@ -45,6 +45,7 @@ HOTKEY_COMMAND string_to_command(const std::string& str)
 		m.insert(val("save",HOTKEY_SAVE_GAME));
 		m.insert(val("recruit",HOTKEY_RECRUIT));
 		m.insert(val("recall",HOTKEY_RECALL));
+		m.insert(val("endturn",HOTKEY_ENDTURN));
 	}
 
 	const std::map<std::string,HOTKEY_COMMAND>::const_iterator i = m.find(str);

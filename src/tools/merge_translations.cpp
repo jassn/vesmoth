@@ -1,4 +1,4 @@
-/* $Id: merge_translations.cpp 33 2003-09-19 10:34:59Z zas $ */
+/* $Id$ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net

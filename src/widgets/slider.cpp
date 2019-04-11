@@ -1,4 +1,4 @@
-/* $Id: slider.cpp 94 2003-09-26 03:41:08Z Sirp $ */
+/* $Id$ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net

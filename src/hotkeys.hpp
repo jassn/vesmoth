@@ -1,4 +1,4 @@
-/* $Id: hotkeys.hpp 73 2003-09-21 09:59:43Z Sirp $ */
+/* $Id$ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net
@@ -23,7 +23,7 @@ enum HOTKEY_COMMAND { HOTKEY_CYCLE_UNITS, HOTKEY_END_UNIT_TURN, HOTKEY_LEADER,
                       HOTKEY_FULLSCREEN, HOTKEY_ACCELERATED,
                       HOTKEY_TERRAIN_TABLE, HOTKEY_ATTACK_RESISTANCE,
                       HOTKEY_UNIT_DESCRIPTION, HOTKEY_SAVE_GAME,
-                      HOTKEY_RECRUIT, HOTKEY_RECALL,
+                      HOTKEY_RECRUIT, HOTKEY_RECALL, HOTKEY_ENDTURN,
                       HOTKEY_NULL };
 
 void add_hotkeys(config& cfg);

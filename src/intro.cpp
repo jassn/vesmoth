@@ -1,4 +1,4 @@
-/* $Id: intro.cpp 71 2003-09-21 07:26:39Z Sirp $ */
+/* $Id$ */
 /*
    Copyright (C) 2003 by David White <davidnwhite@optusnet.com.au>
    Part of the Battle for Wesnoth Project http://wesnoth.whitevine.net
